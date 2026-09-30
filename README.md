@@ -73,16 +73,47 @@ hashed before any of its bytes are returned (sequential `Read`, `Seek`, and
 `ReadAt` across part boundaries), and `Reader.Verify()` hashes everything up
 front. Mismatches return `ErrCorrupted`.
 
+## Retention and safe reclamation
+
+Published versions are reference-counted by policy, never deleted eagerly:
+
+- **References**: a version is retained while it is (a) the `current` version
+  of its key, (b) held by a durable named **pin** (`PinVersion` /
+  `UnpinVersion`, persisted under `refs/` so snapshots survive restarts), or
+  (c) held by an **open reader** — `GetObject`/`GetVersion` register the
+  reader and `Close` releases it.
+- **Delete is a tombstone**: `DeleteObject(key)` removes the `current`
+  pointer and writes a durable `deleted` marker. The key disappears from
+  `GetObject`/`CurrentVersion`, but every version stays readable via
+  `GetVersion` and on disk until unreferenced. Crash recovery never rebuilds
+  a pointer over a tombstone, so a deleted object cannot be resurrected; the
+  next successful publish lifts the tombstone.
+- **Garbage collection**: `CollectGarbage()` sweeps versions that are not
+  current, not pinned and not being read. Reclamation is crash-safe: a
+  version directory is first atomically renamed into `trash/` (the point of
+  no return) and only then deleted, so an interrupted pass never leaves a
+  half-deleted version inside the live tree. Leftover `trash/` entries are
+  discarded by the next `Open` and reported in the `RecoveryReport`.
+- **No interference with in-flight writes**: GC never touches `staging/`, so
+  parts of an in-progress multipart upload and assembled-but-unpublished
+  versions are out of scope. GC, `publish` and `DeleteObject` all serialise
+  on the same per-key lock, and `publish` holds it from the version rename
+  through the pointer update, so a version that is becoming current can never
+  be swept by a concurrent GC pass.
+
 ## Layout
 
 ```
 <root>/
   objects/<sha256(key)>/current                 # winning version id
+  objects/<sha256(key)>/deleted                 # tombstone (when deleted)
   objects/<sha256(key)>/versions/<vid>/manifest.json
   objects/<sha256(key)>/versions/<vid>/data/000001, 000002, ...
   staging/uploads/<upload-id>/{meta.json,parts/}  # in-progress writes
   staging/publish/<vid>/...                        # assembled, pre-commit
   quarantine/{upload,publish,version}/<ts>-<name>/ # isolated residue
+  refs/<sha256(pin-name)>.json                     # durable pins (snapshots)
+  trash/<ts>-<obj>-<vid>/                          # reclaimed, pending delete
   locks/                                           # flocks
 ```
 
@@ -113,6 +144,11 @@ go run ./cmd/objstore put    <root> <key> <file>
 go run ./cmd/objstore get    <root> <key> [file|-]
 go run ./cmd/objstore info   <root> <key>
 go run ./cmd/objstore verify <root> <key>
+go run ./cmd/objstore delete <root> <key>
+go run ./cmd/objstore pin    <root> <key> <version-id> <name>
+go run ./cmd/objstore unpin  <root> <name>
+go run ./cmd/objstore pins   <root>
+go run ./cmd/objstore gc     <root>
 ```
 
 ## Tests
@@ -126,3 +162,8 @@ pointer rebuild, half-publish quarantine, read-time corruption detection
 (including a middle part), startup quarantine with `VerifyOnOpen`, and a
 subprocess that is **actively killed (`SIGKILL`) mid-write** to prove readers
 can never see the partial object and the residue is isolated on restart.
+Retention/GC tests cover: delete-with-pin retention and release, current
+version surviving GC while superseded versions are reclaimed, open-reader
+protection, GC racing an in-flight multipart upload and concurrent
+publishers, abort-then-GC, interrupted-GC trash discarded on recovery, and
+delete tombstones surviving restart (no pointer resurrection).

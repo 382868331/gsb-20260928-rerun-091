@@ -27,6 +27,7 @@ import (
 const (
 	manifestName = "manifest.json"
 	currentName  = "current"
+	deletedName  = "deleted"
 	partsDirName = "parts"
 	dataDirName  = "data"
 )
@@ -47,11 +48,19 @@ type Store struct {
 	upMu       sync.Mutex
 	uploads    map[string]*Upload
 	verifyOpen bool
+	gcMu       sync.Mutex // serialises GC and reader (un)registration
+	readers    map[readerRef]int
+}
+
+// readerRef identifies one immutable version held open by a reader.
+type readerRef struct {
+	key string
+	vid string
 }
 
 // Open (or creates) a store at root and runs crash recovery before returning.
 func Open(root string, opts *Options) (*Store, RecoveryReport, error) {
-	for _, d := range []string{"objects", filepath.Join("staging", "uploads"), filepath.Join("staging", "publish"), "quarantine", "locks"} {
+	for _, d := range []string{"objects", filepath.Join("staging", "uploads"), filepath.Join("staging", "publish"), "quarantine", "locks", "refs", "trash"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			return nil, RecoveryReport{}, err
 		}
@@ -64,6 +73,7 @@ func Open(root string, opts *Options) (*Store, RecoveryReport, error) {
 		root:       root,
 		lock:       lock,
 		uploads:    make(map[string]*Upload),
+		readers:    make(map[readerRef]int),
 		verifyOpen: opts != nil && opts.VerifyOnOpen,
 	}
 	report, err := s.recover()

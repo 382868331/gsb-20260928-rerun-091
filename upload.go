@@ -240,9 +240,20 @@ func (s *Store) buildVersion(key, vid string, parts []PartInfo, uploadDir string
 
 // publish atomically moves the staged version into the object's versions tree,
 // fsyncs, and then updates "current" under a cross-process lock.
+//
+// The per-key lock is taken before the rename (not just before the pointer
+// update) so a concurrent CollectGarbage pass can never observe a version
+// directory that is not yet reachable from "current" and sweep it as
+// unreferenced: GC holds the same lock while evaluating the key's versions.
 func (s *Store) publish(m Manifest, expectedVersion *string) error {
 	s.pubMu.Lock()
 	defer s.pubMu.Unlock()
+
+	lock, err := acquireFlock(filepath.Join(s.root, "locks", "publish-"+objectID(m.Key)+".lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 
 	src := filepath.Join(s.root, "staging", "publish", m.VersionID)
 	dst := filepath.Join(s.versionsDir(m.Key), m.VersionID)
@@ -255,12 +266,10 @@ func (s *Store) publish(m Manifest, expectedVersion *string) error {
 	if err := fsyncDir(s.versionsDir(m.Key)); err != nil {
 		return err
 	}
-
-	lock, err := acquireFlock(filepath.Join(s.root, "locks", "publish-"+objectID(m.Key)+".lock"))
-	if err != nil {
+	// A successful publish lifts any delete tombstone for the key.
+	if err := os.Remove(filepath.Join(s.objectDir(m.Key), deletedName)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	defer lock.release()
 
 	valid, _, err := s.listValidVersions(m.Key)
 	if err != nil {

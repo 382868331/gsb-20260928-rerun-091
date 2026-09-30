@@ -9,6 +9,8 @@ import (
 )
 
 // recover runs after taking the store lock:
+//   - leftover trash/ entries from an interrupted garbage-collection pass
+//     are discarded (their content was already logically reclaimed);
 //   - every unfinished multipart upload is quarantined (never silently kept
 //     where readers could mistake it for a published object);
 //   - every half-published version left in staging/publish is quarantined;
@@ -17,6 +19,18 @@ import (
 //     version (deterministic winner after a crash mid-publish).
 func (s *Store) recover() (RecoveryReport, error) {
 	var rep RecoveryReport
+
+	trashEntries, _ := os.ReadDir(s.trashDir())
+	for _, e := range trashEntries {
+		path := filepath.Join(s.trashDir(), e.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return rep, err
+		}
+		rep.Items = append(rep.Items, RecoveryItem{
+			Kind: "trash", Path: e.Name(), Action: "discarded",
+			Reason: "interrupted garbage collection",
+		})
+	}
 
 	upRoot := filepath.Join(s.root, "staging", "uploads")
 	entries, err := os.ReadDir(upRoot)
@@ -109,6 +123,12 @@ func (s *Store) recover() (RecoveryReport, error) {
 // repairCurrent ensures current points to an existing valid version.
 func (s *Store) repairCurrent(objID string, rep *RecoveryReport) error {
 	objPath := filepath.Join(s.root, "objects", objID)
+	// A delete tombstone means the missing pointer is intentional: the
+	// object must stay deleted and only garbage collection may touch its
+	// remaining versions. Never rebuild a pointer over a tombstone.
+	if _, err := os.Stat(filepath.Join(objPath, deletedName)); err == nil {
+		return nil
+	}
 	vdir := filepath.Join(objPath, "versions")
 	entries, err := os.ReadDir(vdir)
 	if err != nil {

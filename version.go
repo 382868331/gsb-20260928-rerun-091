@@ -79,10 +79,19 @@ func (s *Store) GetVersion(key, versionID string) (ReadSeekCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newVerifyingReader(s.versionsDir(key), m)
+	// Register the reader before returning so a concurrent GC pass cannot
+	// reclaim the version out from under it; Close releases the reference.
+	release := s.trackReader(key, versionID)
+	r, err := newVerifyingReader(s.versionsDir(key), m)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	r.release = release
+	return r, nil
 }
 
-func newVerifyingReader(versionsDir string, m Manifest) (ReadSeekCloser, error) {
+func newVerifyingReader(versionsDir string, m Manifest) (*readerImpl, error) {
 	return &readerImpl{base: filepath.Join(versionsDir, m.VersionID, dataDirName), m: m, checked: make([]bool, len(m.Parts))}, nil
 }
 
@@ -93,11 +102,18 @@ type readerImpl struct {
 	m       Manifest
 	pos     int64
 	checked []bool
+	release func()
 }
 
 func (r *readerImpl) Manifest() Manifest { return r.m }
 
-func (r *readerImpl) Close() error { return nil }
+func (r *readerImpl) Close() error {
+	if r.release != nil {
+		r.release()
+		r.release = nil
+	}
+	return nil
+}
 
 func (r *readerImpl) Seek(offset int64, whence int) (int64, error) {
 	var np int64

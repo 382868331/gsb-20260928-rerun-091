@@ -6,6 +6,11 @@
 //	objstore get   <root> <key> <file->
 //	objstore info  <root> <key>
 //	objstore verify <root> <key>
+//	objstore delete <root> <key>
+//	objstore pin   <root> <key> <version-id> <name>
+//	objstore unpin <root> <name>
+//	objstore pins  <root>
+//	objstore gc    <root>
 package main
 
 import (
@@ -17,10 +22,14 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 4 {
+	if len(os.Args) < 3 {
 		usage()
 	}
-	cmd, root, key := os.Args[1], os.Args[2], os.Args[3]
+	cmd, root := os.Args[1], os.Args[2]
+	key := ""
+	if len(os.Args) >= 4 {
+		key = os.Args[3]
+	}
 	s, rep, err := localobjstore.Open(root, nil)
 	if err != nil {
 		die(err)
@@ -88,13 +97,53 @@ func main() {
 			die(err)
 		}
 		fmt.Println("OK: checksums match")
+	case "delete":
+		if key == "" {
+			usage()
+		}
+		if err := s.DeleteObject(key); err != nil {
+			die(err)
+		}
+		fmt.Printf("deleted %s (versions retained until unreferenced and collected)\n", key)
+	case "pin":
+		if len(os.Args) != 6 {
+			usage()
+		}
+		if err := s.PinVersion(os.Args[5], key, os.Args[4]); err != nil {
+			die(err)
+		}
+		fmt.Printf("pinned %s version=%s as %q\n", key, os.Args[4], os.Args[5])
+	case "unpin":
+		if key == "" {
+			usage()
+		}
+		if err := s.UnpinVersion(key); err != nil {
+			die(err)
+		}
+		fmt.Printf("unpinned %q\n", key)
+	case "pins":
+		pins, err := s.ListPins()
+		if err != nil {
+			die(err)
+		}
+		for _, p := range pins {
+			fmt.Printf("%s %s %s\n", p.Name, p.Key, p.VersionID)
+		}
+	case "gc":
+		grep, err := s.CollectGarbage()
+		if err != nil {
+			die(err)
+		}
+		for _, it := range grep.Items {
+			fmt.Printf("%s %s %s (%s)\n", it.Action, it.Key, it.VersionID, it.Reason)
+		}
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify <root> <key> [file]")
+	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|pin|unpin|pins|gc <root> [key] [args]")
 	os.Exit(2)
 }
 
