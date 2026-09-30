@@ -1,6 +1,10 @@
 package localobjstore
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrNotFound indicates that the object or the requested version does not exist.
@@ -18,3 +22,7 @@ var (
 	// ErrInvalidParts indicates that the completed part list is not 1..N contiguous.
 	ErrInvalidParts = errors.New("localobjstore: invalid part list")
 )
+
+func errNotFound(key string) error { return fmt.Errorf("%w: %s", ErrNotFound, key) }
+
+func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }

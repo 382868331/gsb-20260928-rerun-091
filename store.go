@@ -47,11 +47,25 @@ type Store struct {
 	upMu       sync.Mutex
 	uploads    map[string]*Upload
 	verifyOpen bool
+
+	// gcMu is taken for writing by GC and for reading by publishes and
+	// pointer updates, so a GC pass can never race a publish inside a process.
+	gcMu sync.RWMutex
+
+	// pins are transient references held by open readers. They count as live
+	// references alongside durable snapshots.
+	pinsMu sync.Mutex
+	pins   map[string]int // version ref-key -> open reader count
 }
 
 // Open (or creates) a store at root and runs crash recovery before returning.
 func Open(root string, opts *Options) (*Store, RecoveryReport, error) {
-	for _, d := range []string{"objects", filepath.Join("staging", "uploads"), filepath.Join("staging", "publish"), "quarantine", "locks"} {
+	for _, d := range []string{
+		"objects",
+		filepath.Join("staging", "uploads"),
+		filepath.Join("staging", "publish"),
+		"quarantine", "locks", "refs", "deleted",
+	} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			return nil, RecoveryReport{}, err
 		}
@@ -65,6 +79,7 @@ func Open(root string, opts *Options) (*Store, RecoveryReport, error) {
 		lock:       lock,
 		uploads:    make(map[string]*Upload),
 		verifyOpen: opts != nil && opts.VerifyOnOpen,
+		pins:       make(map[string]int),
 	}
 	report, err := s.recover()
 	if err != nil {

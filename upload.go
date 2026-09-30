@@ -241,8 +241,40 @@ func (s *Store) buildVersion(key, vid string, parts []PartInfo, uploadDir string
 // publish atomically moves the staged version into the object's versions tree,
 // fsyncs, and then updates "current" under a cross-process lock.
 func (s *Store) publish(m Manifest, expectedVersion *string) error {
+	// Order: gcMu before pubMu, matching DeleteObject, so a GC pass waiting on
+	// readers cannot deadlock against a publisher waiting on pubMu.
+	s.gcMu.RLock()
+	defer s.gcMu.RUnlock()
 	s.pubMu.Lock()
 	defer s.pubMu.Unlock()
+
+	// Take the per-key cross-process lock BEFORE making the version visible,
+	// so GC in another process cannot observe and reclaim the new version
+	// while it is visible but not yet current.
+	lock, err := acquireFlock(filepath.Join(s.root, "locks", "publish-"+objectID(m.Key)+".lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.release()
+
+	// Fast-fail the CAS condition before committing. It is re-checked after
+	// the rename while still holding the per-key lock; a late loss rolls the
+	// version back out of the live tree so no orphaned, never-current version
+	// directory is left behind.
+	preCur, err := s.readCurrent(m.Key)
+	if err != nil {
+		return err
+	}
+	if expectedVersion != nil && preCur != *expectedVersion {
+		return ErrConflict
+	}
+	// Publishing onto a previously deleted key resurrects it: the tombstone
+	// must not linger or GC would treat the new content as deleted.
+	tomb, err := s.readTombstone(m.Key)
+	if err != nil {
+		return err
+	}
+	removeTomb := tomb != nil
 
 	src := filepath.Join(s.root, "staging", "publish", m.VersionID)
 	dst := filepath.Join(s.versionsDir(m.Key), m.VersionID)
@@ -255,15 +287,23 @@ func (s *Store) publish(m Manifest, expectedVersion *string) error {
 	if err := fsyncDir(s.versionsDir(m.Key)); err != nil {
 		return err
 	}
-
-	lock, err := acquireFlock(filepath.Join(s.root, "locks", "publish-"+objectID(m.Key)+".lock"))
-	if err != nil {
+	if removeTomb {
+		if err := os.Remove(s.deletedPath(m.Key)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		_ = fsyncDir(filepath.Join(s.root, "deleted"))
+	}
+	rollback := func() error {
+		err := os.Rename(dst, src)
+		if err == nil {
+			_ = fsyncDir(s.versionsDir(m.Key))
+		}
 		return err
 	}
-	defer lock.release()
 
 	valid, _, err := s.listValidVersions(m.Key)
 	if err != nil {
+		_ = rollback()
 		return err
 	}
 	highest := m.VersionID
@@ -272,15 +312,21 @@ func (s *Store) publish(m Manifest, expectedVersion *string) error {
 	}
 	cur, err := s.readCurrent(m.Key)
 	if err != nil {
+		_ = rollback()
 		return err
 	}
 	if expectedVersion != nil && cur != *expectedVersion {
+		_ = rollback()
 		return ErrConflict
 	}
 	if cur == highest {
 		return nil
 	}
-	return s.writeCurrent(m.Key, highest)
+	if err := s.writeCurrent(m.Key, highest); err != nil {
+		_ = rollback()
+		return err
+	}
+	return nil
 }
 
 // PutObject is the small-object convenience path: it runs the same staged,

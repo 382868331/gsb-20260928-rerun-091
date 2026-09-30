@@ -126,3 +126,72 @@ pointer rebuild, half-publish quarantine, read-time corruption detection
 (including a middle part), startup quarantine with `VerifyOnOpen`, and a
 subprocess that is **actively killed (`SIGKILL`) mid-write** to prove readers
 can never see the partial object and the residue is isolated on restart.
+
+## Retention policy and safe reclamation
+
+Deletion is a two-phase operation. `DeleteObject(key)` commits a durable
+`tombstone` and removes the `current` pointer; it never deletes payload bytes.
+Content stays protected while anything references it:
+
+- **durable snapshots**: `Snapshot(key, versionID)` writes a read-only
+  reference under `refs/<sha256(key)>/` that survives process restarts and
+  keeps the exact version readable (`GetVersion`) after the object is deleted
+  or overwritten; `ReleaseSnapshot` drops it and `ListSnapshots` inspects them;
+- **open readers**: `GetObject` / `GetVersion` register a transient per-version
+  pin for the lifetime of the returned reader (`Close` releases it); a
+  concurrent collector cannot reclaim bytes a reader is still serving.
+
+`GC(ctx, opts)` performs the actual reclamation:
+
+- versions of *deleted* objects are eligible only after `MinAge` since the
+  deletion; non-current versions of *live* objects after `MinAge` since
+  publication (default 24h; `MinAge: 0` disables the grace period);
+- the current version is never touched; a version pinned by a snapshot or an
+  open reader is never touched;
+- staging (`uploads/`, `publish/`) is never scanned, so parts of an upload or
+  a new version that has not finished publishing cannot be mistaken for
+  garbage, even when GC runs concurrently with `WritePart`/`Complete`;
+- collection is interruptible via `ctx`: on cancellation it returns the work
+  done plus `ctx.Err()`. Nothing is deleted in place, so reopening and running
+  GC again simply re-validates every candidate version and digest from disk;
+- reclaimed and corrupt versions are moved to `quarantine/gc/` (the recycling
+  bin), never hard-erased; with `GCOptions{VerifyContent: true}` each
+  candidate is fully re-hashed and a digest mismatch is isolated as `corrupt`.
+
+GC and publishing coordinate with the store-wide RWMutex in-process and with
+per-key `flock`s across processes; the publish lock is taken *before* the new
+version directory becomes visible, so no version is ever reachable but not yet
+current. A lost optimistic-CAS race after the rename rolls the version back
+out of the live tree instead of leaving an orphan.
+
+## Recovery vs. corruption (never resurrected)
+
+Recovery re-verifies every version on restart (structure always, bytes with
+`VerifyOnOpen`) and re-checks snapshot references. A durable snapshot whose
+version is gone is discarded. When the current pointer's target is quarantined
+as corrupt the pointer is **removed**, never rebuilt onto an older version:
+the object fails closed (`GetObject` errors) rather than silently serving
+stale content. A pointer is rebuilt to the highest valid version only when it
+is genuinely missing/dangling (crash between publish rename and pointer
+commit). Tombstones left by a crash mid-delete are reconciled the same way.
+
+```
+<root>/
+  objects/<sha256(key)>/{current,versions/<vid>/...}
+  refs/<sha256(key)>/<ref-id>.json       # durable snapshots
+  deleted/<sha256(key)>.json             # tombstones
+  staging/{uploads,publish}/...          # never scanned by GC
+  quarantine/{upload,publish,version,gc}/ # isolated residue / recycling bin
+  locks/
+```
+
+CLI additions:
+
+```
+go run ./cmd/objstore delete     <root> <key>
+go run ./cmd/objstore gc         <root> -
+go run ./cmd/objstore snapshot   <root> <key> [version-id|-]
+go run ./cmd/objstore snapshots  <root> <key>
+go run ./cmd/objstore release    <root> <key> <snapshot-id>
+go run ./cmd/objstore getversion <root> <key> <version-id>
+```

@@ -73,31 +73,43 @@ func (s *Store) GetObject(key string) (ReadSeekCloser, error) {
 // GetVersion opens a specific immutable version for reading.
 func (s *Store) GetVersion(key, versionID string) (ReadSeekCloser, error) {
 	if err := s.validateVersionStructure(key, versionID); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s %s", ErrNotFound, key, versionID)
+		}
 		return nil, err
 	}
 	m, err := s.loadManifest(key, versionID)
 	if err != nil {
 		return nil, err
 	}
-	return newVerifyingReader(s.versionsDir(key), m)
-}
-
-func newVerifyingReader(versionsDir string, m Manifest) (ReadSeekCloser, error) {
-	return &readerImpl{base: filepath.Join(versionsDir, m.VersionID, dataDirName), m: m, checked: make([]bool, len(m.Parts))}, nil
+	// Register the transient pin before handing out bytes, so a concurrent GC
+	// cannot reclaim a version this reader is actively serving.
+	s.addPin(key, versionID)
+	return &readerImpl{store: s, key: key, base: filepath.Join(s.versionsDir(key), versionID, dataDirName), m: m, checked: make([]bool, len(m.Parts))}, nil
 }
 
 // readerImpl provides checksum-verified sequential reads, random access and a
 // full Verify pass.
 type readerImpl struct {
+	store   *Store
+	key     string
 	base    string
 	m       Manifest
 	pos     int64
 	checked []bool
+	closed  bool
 }
 
 func (r *readerImpl) Manifest() Manifest { return r.m }
 
-func (r *readerImpl) Close() error { return nil }
+func (r *readerImpl) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	r.store.releasePin(r.key, r.m.VersionID)
+	return nil
+}
 
 func (r *readerImpl) Seek(offset int64, whence int) (int64, error) {
 	var np int64
