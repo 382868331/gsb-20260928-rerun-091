@@ -17,4 +17,9 @@ var (
 
 	// ErrInvalidParts indicates that the completed part list is not 1..N contiguous.
 	ErrInvalidParts = errors.New("localobjstore: invalid part list")
+
+	// ErrFaulted indicates the current version was quarantined as corrupt and
+	// the object awaits an explicit RestoreVersion; historical versions stay
+	// readable via GetVersion but none masquerades as current.
+	ErrFaulted = errors.New("localobjstore: current version quarantined as corrupt, explicit restore required")
 )

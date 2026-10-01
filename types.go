@@ -22,6 +22,29 @@ type Manifest struct {
 	Size      int64      `json:"size"`
 	Sha256    string     `json:"sha256"` // hex SHA-256 over the concatenation of all parts
 	Parts     []PartInfo `json:"parts"`
+	// RestoredFrom records the source version when this manifest was created
+	// by RestoreVersion; empty for ordinary publishes. The original corrupt
+	// evidence in quarantine is never rewritten.
+	RestoredFrom string `json:"restored_from,omitempty"`
+}
+
+// FaultRecord is the durable fact that the current version of a key was
+// quarantined as corrupt. It is written once and survives restarts until an
+// explicit RestoreVersion, DeleteObject or a fresh publish resolves it, so
+// reopening the store never changes the failure fact.
+type FaultRecord struct {
+	Key        string    `json:"key"`
+	VersionID  string    `json:"version_id"` // quarantined corrupt version
+	Reason     string    `json:"reason"`
+	DetectedAt time.Time `json:"detected_at"`
+}
+
+// VersionStatus pairs a published version with its full verification result,
+// so a human can choose a restore candidate with evidence.
+type VersionStatus struct {
+	Manifest Manifest
+	Verified bool  // structural check and all checksums passed
+	Err      error // nil when Verified
 }
 
 // ReadSeekCloser is the stable reading entry point exposed to readers.

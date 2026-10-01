@@ -7,6 +7,9 @@
 //	objstore info  <root> <key>
 //	objstore verify <root> <key>
 //	objstore delete <root> <key>
+//	objstore fault <root> <key>
+//	objstore candidates <root> <key>
+//	objstore restore <root> <key> <version-id>
 //	objstore pin   <root> <key> <version-id> <name>
 //	objstore unpin <root> <name>
 //	objstore pins  <root>
@@ -105,6 +108,44 @@ func main() {
 			die(err)
 		}
 		fmt.Printf("deleted %s (versions retained until unreferenced and collected)\n", key)
+	case "fault":
+		if key == "" {
+			usage()
+		}
+		rec, ok, err := s.Fault(key)
+		if err != nil {
+			die(err)
+		}
+		if !ok {
+			fmt.Printf("no fault recorded for %s\n", key)
+			break
+		}
+		fmt.Printf("FAULT %s current version %s quarantined as corrupt at %s\n  reason: %s\n  restore with: objstore restore %s %s <version-id>\n",
+			key, rec.VersionID, rec.DetectedAt.Format("2006-01-02T15:04:05Z"), rec.Reason, root, key)
+	case "candidates":
+		if key == "" {
+			usage()
+		}
+		vs, err := s.InspectVersions(key)
+		if err != nil {
+			die(err)
+		}
+		for _, st := range vs {
+			if st.Verified {
+				fmt.Printf("OK   %s size=%d parts=%d\n", st.Manifest.VersionID, st.Manifest.Size, len(st.Manifest.Parts))
+			} else {
+				fmt.Printf("BAD  %s (%v)\n", st.Manifest.VersionID, st.Err)
+			}
+		}
+	case "restore":
+		if len(os.Args) != 5 {
+			usage()
+		}
+		m, err := s.RestoreVersion(key, os.Args[4])
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("restored %s as new version=%s from=%s size=%d\n", key, m.VersionID, m.RestoredFrom, m.Size)
 	case "pin":
 		if len(os.Args) != 6 {
 			usage()
@@ -143,7 +184,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|pin|unpin|pins|gc <root> [key] [args]")
+	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|fault|candidates|restore|pin|unpin|pins|gc <root> [key] [args]")
 	os.Exit(2)
 }
 

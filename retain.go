@@ -139,6 +139,20 @@ func (s *Store) DeleteObject(key string) error {
 		return err
 	}
 	if cur == "" {
+		// A faulted object has no current pointer but still exists: deleting
+		// it resolves the fault with a tombstone so its remaining versions
+		// become ordinary GC candidates.
+		if rec, ok, ferr := s.Fault(key); ferr != nil {
+			return ferr
+		} else if ok {
+			if werr := writeFileAtomic(s.objectDir(key), deletedName, []byte(rec.VersionID+"\n"), 0o644); werr != nil {
+				return werr
+			}
+			if rerr := os.Remove(s.faultPath(key)); rerr != nil {
+				return rerr
+			}
+			return fsyncDir(s.objectDir(key))
+		}
 		return fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
 	if err := writeFileAtomic(s.objectDir(key), deletedName, []byte(cur+"\n"), 0o644); err != nil {
@@ -251,6 +265,14 @@ func (s *Store) collectObject(objID string, rep *GCReport) error {
 	}
 	curData, _ := os.ReadFile(filepath.Join(objPath, currentName))
 	current := strings.TrimSpace(string(curData))
+	// An object with a recorded corruption fault keeps every remaining
+	// version: they are the operator's restore candidates and must never be
+	// reclaimed out from under a pending manual recovery, even when readers,
+	// tombstones and GC passes coincide.
+	_, faulted, err := s.readFaultByObjID(objID)
+	if err != nil {
+		return err
+	}
 
 	for _, ve := range entries {
 		if !ve.IsDir() || !strings.HasPrefix(ve.Name(), "v") {
@@ -263,6 +285,10 @@ func (s *Store) collectObject(objID string, rep *GCReport) error {
 		}
 		key := m.Key
 		if vid == current {
+			continue
+		}
+		if faulted {
+			rep.Items = append(rep.Items, GCItem{Key: key, VersionID: vid, Action: "retained", Reason: "fault recovery candidate"})
 			continue
 		}
 		pinned, err := s.pinsForKey(key)

@@ -270,6 +270,11 @@ func (s *Store) publish(m Manifest, expectedVersion *string) error {
 	if err := os.Remove(filepath.Join(s.objectDir(m.Key), deletedName)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// A successful publish (including a restore) also resolves any recorded
+	// corruption fault: the new current version is valid and supersedes it.
+	if err := os.Remove(filepath.Join(s.objectDir(m.Key), faultName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 
 	valid, _, err := s.listValidVersions(m.Key)
 	if err != nil {

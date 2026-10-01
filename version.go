@@ -32,6 +32,11 @@ func (s *Store) CurrentVersion(key string) (Manifest, error) {
 		return Manifest{}, err
 	}
 	if vid == "" {
+		if _, ok, ferr := s.Fault(key); ferr != nil {
+			return Manifest{}, ferr
+		} else if ok {
+			return Manifest{}, fmt.Errorf("%w: %s", ErrFaulted, key)
+		}
 		return Manifest{}, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
 	if err := s.validateVersionStructure(key, vid); err != nil {
@@ -65,6 +70,11 @@ func (s *Store) GetObject(key string) (ReadSeekCloser, error) {
 		return nil, err
 	}
 	if vid == "" {
+		if _, ok, ferr := s.Fault(key); ferr != nil {
+			return nil, ferr
+		} else if ok {
+			return nil, fmt.Errorf("%w: %s", ErrFaulted, key)
+		}
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
 	return s.GetVersion(key, vid)

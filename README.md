@@ -60,6 +60,36 @@ root concurrently) and then:
 - repairs a missing or dangling `current` by selecting the highest valid
   version id; every action is returned in the `RecoveryReport`.
 
+If the invalid version is the one `current` points at, recovery does **not**
+silently roll the object back to an older version: it quarantines the corrupt
+version, removes the pointer and writes a durable `fault` marker
+(`FaultRecord`). From then on `GetObject`/`CurrentVersion` fail with
+`ErrFaulted`, while historical versions stay explicitly readable via
+`GetVersion`. The marker makes the failure fact stable: reopening the store
+any number of times reports the same fault instead of resurrecting old
+content as current.
+
+## Manual restore
+
+A faulted object is recovered explicitly, by a human choosing a candidate on
+evidence:
+
+- `Fault(key)` returns the recorded `FaultRecord` (quarantined version id,
+  reason, detection time).
+- `InspectVersions(key)` lists every remaining version together with a full
+  structural and checksum verification result (`VersionStatus.Verified/Err`).
+- `RestoreVersion(key, versionID)` fully verifies the chosen version first;
+  a failed verification returns an error and changes nothing. On success it
+  assembles a **new** immutable version record (`RestoredFrom` names the
+  source) and makes it current; the quarantined corrupt evidence is never
+  rewritten or deleted. A fresh publish likewise lifts the fault, and
+  `DeleteObject` on a faulted object resolves it into a tombstone.
+
+While a fault is recorded, `CollectGarbage` retains all of the object's
+remaining versions as restore candidates (pins, open readers and tombstones
+keep their usual protection on top), so a pending manual recovery can never
+lose its sources to reclamation.
+
 Readers can therefore never observe a half-written object: unpublished bytes
 live only in staging and are isolated on the next start. With
 `Options{VerifyOnOpen: true}`, recovery also hashes all bytes and quarantines
@@ -107,6 +137,7 @@ Published versions are reference-counted by policy, never deleted eagerly:
 <root>/
   objects/<sha256(key)>/current                 # winning version id
   objects/<sha256(key)>/deleted                 # tombstone (when deleted)
+  objects/<sha256(key)>/fault                   # recorded corruption fault (when current was quarantined)
   objects/<sha256(key)>/versions/<vid>/manifest.json
   objects/<sha256(key)>/versions/<vid>/data/000001, 000002, ...
   staging/uploads/<upload-id>/{meta.json,parts/}  # in-progress writes
@@ -145,6 +176,9 @@ go run ./cmd/objstore get    <root> <key> [file|-]
 go run ./cmd/objstore info   <root> <key>
 go run ./cmd/objstore verify <root> <key>
 go run ./cmd/objstore delete <root> <key>
+go run ./cmd/objstore fault      <root> <key>
+go run ./cmd/objstore candidates <root> <key>
+go run ./cmd/objstore restore    <root> <key> <version-id>
 go run ./cmd/objstore pin    <root> <key> <version-id> <name>
 go run ./cmd/objstore unpin  <root> <name>
 go run ./cmd/objstore pins   <root>

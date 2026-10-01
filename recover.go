@@ -79,6 +79,9 @@ func (s *Store) recover() (RecoveryReport, error) {
 		if !od.IsDir() {
 			continue
 		}
+		objPath := filepath.Join(s.root, "objects", od.Name())
+		curData, _ := os.ReadFile(filepath.Join(objPath, currentName))
+		curID := string(bytesTrimSpace(curData))
 		vdir := filepath.Join(s.root, "objects", od.Name(), "versions")
 		ventries, err := os.ReadDir(vdir)
 		if os.IsNotExist(err) {
@@ -111,6 +114,24 @@ func (s *Store) recover() (RecoveryReport, error) {
 				if qerr != nil {
 					return rep, qerr
 				}
+				// Quarantining the version "current" points at must not
+				// silently roll the object back to an older version: record
+				// a durable fault and drop the pointer, so readers see an
+				// explicit failure until a human restores a chosen version.
+				if ve.Name() == curID {
+					rec := faultRecord(m.Key, curID, verr.Error())
+					if ferr := writeFault(objPath, rec); ferr != nil {
+						return rep, ferr
+					}
+					if rerr := os.Remove(filepath.Join(objPath, currentName)); rerr != nil && !os.IsNotExist(rerr) {
+						return rep, rerr
+					}
+					_ = fsyncDir(objPath)
+					rep.Items = append(rep.Items, RecoveryItem{
+						Kind: "fault", Key: m.Key, Path: objPath, Action: "fault-recorded",
+						Reason: fmt.Sprintf("current version %s quarantined as corrupt", curID),
+					})
+				}
 			}
 		}
 		if err := s.repairCurrent(od.Name(), &rep); err != nil {
@@ -127,6 +148,28 @@ func (s *Store) repairCurrent(objID string, rep *RecoveryReport) error {
 	// object must stay deleted and only garbage collection may touch its
 	// remaining versions. Never rebuild a pointer over a tombstone.
 	if _, err := os.Stat(filepath.Join(objPath, deletedName)); err == nil {
+		return nil
+	}
+	// A recorded fault is a stable failure fact: never rebuild the pointer
+	// over it, so repeated restarts keep reporting the same fault instead of
+	// resurrecting an old version as current. A stale fault marker next to a
+	// valid current pointer (e.g. crash mid-restore) is cleared.
+	if _, ok, err := s.readFaultByObjID(objID); err != nil {
+		return err
+	} else if ok {
+		cur, _ := os.ReadFile(filepath.Join(objPath, currentName))
+		curID := string(bytesTrimSpace(cur))
+		if curID != "" {
+			if _, serr := os.Stat(filepath.Join(objPath, "versions", curID, manifestName)); serr == nil {
+				if rerr := os.Remove(filepath.Join(objPath, faultName)); rerr != nil {
+					return rerr
+				}
+				rep.Items = append(rep.Items, RecoveryItem{
+					Kind: "fault", Path: objPath, Action: "fault-cleared",
+					Reason: "current pointer valid again",
+				})
+			}
+		}
 		return nil
 	}
 	vdir := filepath.Join(objPath, "versions")
