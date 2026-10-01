@@ -86,38 +86,17 @@ func TestCorruptionDetectedOnRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	// Structural recovery passes (sizes match), but content read fails loudly.
-	if len(rep.Items) != 0 {
-		t.Fatalf("same-size corruption should survive structural scan: %+v", rep.Items)
-	}
-	r, err := s2.GetObject("data/important")
-	if err != nil {
-		t.Fatalf("open should be lazy, got %v", err)
-	}
-	defer r.Close()
-	buf := make([]byte, 100)
-	if _, err := r.ReadAt(buf[:8], 0); err == nil {
-		t.Fatal("expected checksum error on read of corrupted part")
-	}
-	if err := r.Verify(); !errors.Is(err, ErrCorrupted) {
-		t.Fatalf("Verify = %v, want ErrCorrupted", err)
-	}
-
-	// With VerifyOnOpen the corrupted version is isolated at startup.
-	s2.Close()
-	s3, rep3, err := Open(dir, &Options{VerifyOnOpen: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s3.Close()
 	found := false
-	for _, it := range rep3.Items {
+	for _, it := range rep.Items {
 		if it.Kind == "version" && it.Action == "quarantined" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("corrupted version not quarantined with VerifyOnOpen: %+v", rep3.Items)
+		t.Fatalf("corrupted current not quarantined on reopen: %+v", rep.Items)
+	}
+	if _, err := s2.GetObject("data/important"); !errors.Is(err, ErrCorrupted) {
+		t.Fatalf("damaged current readable as fallback, got %v", err)
 	}
 }
 
@@ -211,13 +190,8 @@ func TestCorruptMiddlePartMultipart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	r, err := s2.GetObject("multi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	if err := r.Verify(); !errors.Is(err, ErrCorrupted) {
-		t.Fatalf("middle-part corruption not detected: %v", err)
+	if _, err := s2.GetObject("multi"); !errors.Is(err, ErrCorrupted) {
+		t.Fatalf("middle-part corruption not isolated as current: %v", err)
 	}
 }
 

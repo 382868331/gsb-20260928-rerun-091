@@ -49,3 +49,24 @@ type RecoveryItem struct {
 type RecoveryReport struct {
 	Items []RecoveryItem
 }
+
+// CorruptionRecord is the durable fact that a current version was damaged.
+type CorruptionRecord struct {
+	Key                string     `json:"key"`
+	CorruptedVersionID string     `json:"corrupted_version_id"`
+	QuarantinePath     string     `json:"quarantine_path"`
+	Reason             string     `json:"reason"`
+	DetectedAt         time.Time  `json:"detected_at"`
+	Active             bool       `json:"active"`
+	SourceVersionID    string     `json:"source_version_id,omitempty"`
+	RestoredVersionID  string     `json:"restored_version_id,omitempty"`
+	RestorePendingID   string     `json:"restore_pending_id,omitempty"`
+	ResolvedAt         *time.Time `json:"resolved_at,omitempty"`
+}
+
+// RecoveryCandidate describes a historical version that may be restored.
+type RecoveryCandidate struct {
+	Manifest Manifest
+	Verified bool
+	Error    string
+}

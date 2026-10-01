@@ -2,6 +2,7 @@ package localobjstore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,6 +88,9 @@ func (s *Store) recover() (RecoveryReport, error) {
 		if err != nil {
 			return rep, err
 		}
+		curData, _ := os.ReadFile(filepath.Join(s.root, "objects", od.Name(), currentName))
+		currentID := string(bytesTrimSpace(curData))
+		_, preExistingCorruption := os.Stat(filepath.Join(s.root, "objects", od.Name(), corruptionName))
 		for _, ve := range ventries {
 			if !ve.IsDir() || ve.Name()[0] != 'v' {
 				continue
@@ -99,18 +103,46 @@ func (s *Store) recover() (RecoveryReport, error) {
 			} else {
 				verr = merr
 			}
-			if verr == nil && s.verifyOpen {
+			if verr == nil && (s.verifyOpen || ve.Name() == currentID) {
 				verr = verifyDirBytes(vp, m)
 			}
 			if verr != nil {
+				isCurrent := ve.Name() == currentID
 				qd, qerr := s.quarantine("version", vp)
+				if qerr != nil {
+					return rep, qerr
+				}
+				if isCurrent {
+					key := m.Key
+					if key == "" {
+						key = od.Name()
+					}
+					rec := CorruptionRecord{
+						Key: key, CorruptedVersionID: ve.Name(), QuarantinePath: qd,
+						Reason: verr.Error(), DetectedAt: time.Now().UTC(), Active: true,
+					}
+					if err := writeCorruption(filepath.Join(s.root, "objects", od.Name()), rec); err != nil {
+						return rep, err
+					}
+					if err := os.Remove(filepath.Join(s.root, "objects", od.Name(), currentName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return rep, err
+					}
+					if err := fsyncDir(filepath.Join(s.root, "objects", od.Name())); err != nil {
+						return rep, err
+					}
+				}
 				rep.Items = append(rep.Items, RecoveryItem{
 					Kind: "version", Key: m.Key, Path: vp, Action: "quarantined",
 					Reason: verr.Error(), QuarDir: qd,
 				})
-				if qerr != nil {
-					return rep, qerr
-				}
+			}
+		}
+		if preExistingCorruption == nil {
+			if err := s.reportExistingCorruption(od.Name(), &rep); err != nil {
+				return rep, err
+			}
+			if err := s.resumePendingRestore(od.Name(), &rep); err != nil {
+				return rep, err
 			}
 		}
 		if err := s.repairCurrent(od.Name(), &rep); err != nil {
@@ -120,9 +152,83 @@ func (s *Store) recover() (RecoveryReport, error) {
 	return rep, nil
 }
 
+func (s *Store) reportExistingCorruption(objID string, rep *RecoveryReport) error {
+	b, err := os.ReadFile(filepath.Join(s.root, "objects", objID, corruptionName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var rec CorruptionRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return err
+	}
+	if rec.Active {
+		rep.Items = append(rep.Items, RecoveryItem{
+			Kind: "version", Key: rec.Key, Path: rec.CorruptedVersionID,
+			Action: "quarantined", Reason: rec.Reason, QuarDir: rec.QuarantinePath,
+		})
+	}
+	return nil
+}
+
+func (s *Store) resumePendingRestore(objID string, rep *RecoveryReport) error {
+	objPath := filepath.Join(s.root, "objects", objID)
+	b, err := os.ReadFile(filepath.Join(objPath, corruptionName))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var rec CorruptionRecord
+	if err := json.Unmarshal(b, &rec); err != nil || !rec.Active || rec.RestorePendingID == "" {
+		return err
+	}
+	vdir := filepath.Join(objPath, "versions", rec.RestorePendingID)
+	m, err := readAnyManifest(vdir)
+	if os.IsNotExist(err) {
+		rec.RestorePendingID = ""
+		return writeCorruption(objPath, rec)
+	}
+	if err != nil {
+		return err
+	}
+	if err := validateDir(vdir, m); err != nil {
+		return err
+	}
+	if err := verifyDirBytes(vdir, m); err != nil {
+		return err
+	}
+	if err := s.writeCurrent(rec.Key, rec.RestorePendingID); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(objPath, deletedName)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	now := time.Now().UTC()
+	restoredID := rec.RestorePendingID
+	rec.Active = false
+	rec.RestoredVersionID = restoredID
+	rec.ResolvedAt = &now
+	rec.RestorePendingID = ""
+	if err := writeCorruption(objPath, rec); err != nil {
+		return err
+	}
+	rep.Items = append(rep.Items, RecoveryItem{
+		Kind: "pointer", Key: rec.Key, Path: objPath, Action: "pointer-rebuilt",
+		Reason: "resume restore -> " + restoredID,
+	})
+	return nil
+}
+
 // repairCurrent ensures current points to an existing valid version.
 func (s *Store) repairCurrent(objID string, rep *RecoveryReport) error {
 	objPath := filepath.Join(s.root, "objects", objID)
+	if _, err := os.Stat(filepath.Join(objPath, corruptionName)); err == nil {
+		return nil
+	}
 	// A delete tombstone means the missing pointer is intentional: the
 	// object must stay deleted and only garbage collection may touch its
 	// remaining versions. Never rebuild a pointer over a tombstone.

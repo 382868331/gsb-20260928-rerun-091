@@ -251,12 +251,23 @@ func (s *Store) collectObject(objID string, rep *GCReport) error {
 	}
 	curData, _ := os.ReadFile(filepath.Join(objPath, currentName))
 	current := strings.TrimSpace(string(curData))
+	corruptionActive := false
+	if b, err := os.ReadFile(filepath.Join(objPath, corruptionName)); err == nil {
+		var rec CorruptionRecord
+		if json.Unmarshal(b, &rec) == nil && rec.Active {
+			corruptionActive = true
+		}
+	}
 
 	for _, ve := range entries {
 		if !ve.IsDir() || !strings.HasPrefix(ve.Name(), "v") {
 			continue
 		}
 		vid := ve.Name()
+		if corruptionActive {
+			rep.Items = append(rep.Items, GCItem{VersionID: vid, Action: "retained", Reason: "recovery candidate"})
+			continue
+		}
 		m, err := readAnyManifest(filepath.Join(vdir, vid))
 		if err != nil {
 			continue // corrupt versions are recovery's job, never GC's

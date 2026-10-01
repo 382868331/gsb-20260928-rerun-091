@@ -27,6 +27,11 @@ func parseVersionTime(vid string) time.Time {
 
 // CurrentVersion returns the manifest of the winning (current) version.
 func (s *Store) CurrentVersion(key string) (Manifest, error) {
+	if rec, err := s.readCorruption(key); err != nil {
+		return Manifest{}, err
+	} else if rec.Active {
+		return Manifest{}, fmt.Errorf("%w: current version %s: %s", ErrCorrupted, rec.CorruptedVersionID, rec.Reason)
+	}
 	vid, err := s.readCurrent(key)
 	if err != nil {
 		return Manifest{}, err
@@ -60,6 +65,11 @@ func (s *Store) ListVersions(key string) ([]Manifest, error) {
 // GetObject opens the current version for reading. SHA-256 checksums are
 // verified lazily as bytes are consumed; Verify() checks every byte up front.
 func (s *Store) GetObject(key string) (ReadSeekCloser, error) {
+	if rec, err := s.readCorruption(key); err != nil {
+		return nil, err
+	} else if rec.Active {
+		return nil, fmt.Errorf("%w: current version %s: %s", ErrCorrupted, rec.CorruptedVersionID, rec.Reason)
+	}
 	vid, err := s.readCurrent(key)
 	if err != nil {
 		return nil, err

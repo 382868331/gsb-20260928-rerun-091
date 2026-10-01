@@ -57,13 +57,31 @@ root concurrently) and then:
   rename) to `quarantine/publish/...`;
 - structurally validates every published version; invalid versions are moved
   to `quarantine/version/...` instead of being deleted;
-- repairs a missing or dangling `current` by selecting the highest valid
-  version id; every action is returned in the `RecoveryReport`.
+- repairs a missing or dangling `current` after an interrupted publish by
+  selecting the highest valid version id; every action is returned in the
+  `RecoveryReport`.
 
 Readers can therefore never observe a half-written object: unpublished bytes
 live only in staging and are isolated on the next start. With
 `Options{VerifyOnOpen: true}`, recovery also hashes all bytes and quarantines
-content-corrupted versions.
+content-corrupted versions. The current version is always byte-verified on
+reopen: a damaged current version is quarantined and recorded, but never
+silently replaced by an older version.
+
+## Manual recovery
+
+`ListCorruptions()` exposes active and resolved corruption facts.
+`ListRecoveryCandidates(key)` lists remaining historical versions and runs
+their full checksum verification. `RestoreVersion(key, versionID)` accepts an
+explicit user choice, copies the verified source into a brand-new version,
+points `current` at that new record, and marks the corruption resolved. The
+source version and original quarantined evidence remain untouched. Failed
+verification leaves both the pointer and corruption record unchanged.
+
+While a corruption fact is active, GC retains all remaining historical
+versions as recovery candidates, even with a delete tombstone, pins, or open
+readers. A crash between creating the restored copy and publishing its pointer
+is resumed on the next `Open`.
 
 ## Read-time corruption detection
 
@@ -107,6 +125,7 @@ Published versions are reference-counted by policy, never deleted eagerly:
 <root>/
   objects/<sha256(key)>/current                 # winning version id
   objects/<sha256(key)>/deleted                 # tombstone (when deleted)
+  objects/<sha256(key)>/corruption.json         # durable corruption/restore fact
   objects/<sha256(key)>/versions/<vid>/manifest.json
   objects/<sha256(key)>/versions/<vid>/data/000001, 000002, ...
   staging/uploads/<upload-id>/{meta.json,parts/}  # in-progress writes
@@ -149,6 +168,9 @@ go run ./cmd/objstore pin    <root> <key> <version-id> <name>
 go run ./cmd/objstore unpin  <root> <name>
 go run ./cmd/objstore pins   <root>
 go run ./cmd/objstore gc     <root>
+go run ./cmd/objstore recoveries <root>
+go run ./cmd/objstore candidates <root> <key>
+go run ./cmd/objstore restore    <root> <key> <version-id>
 ```
 
 ## Tests
@@ -167,3 +189,8 @@ version surviving GC while superseded versions are reclaimed, open-reader
 protection, GC racing an in-flight multipart upload and concurrent
 publishers, abort-then-GC, interrupted-GC trash discarded on recovery, and
 delete tombstones surviving restart (no pointer resurrection).
+Manual-recovery tests cover stable corrupted-current facts across repeated
+opens, explicit historical reads, verified candidate listings, restore-as-new
+while preserving quarantine evidence, failed-restore state stability, GC
+retention under delete/read/pin protection, and continuation after interrupted
+uploads, current-version corruption and interrupted GC.

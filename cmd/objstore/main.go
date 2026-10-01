@@ -11,6 +11,9 @@
 //	objstore unpin <root> <name>
 //	objstore pins  <root>
 //	objstore gc    <root>
+//	objstore recoveries <root>
+//	objstore candidates <root> <key>
+//	objstore restore    <root> <key> <version-id>
 package main
 
 import (
@@ -129,6 +132,39 @@ func main() {
 		for _, p := range pins {
 			fmt.Printf("%s %s %s\n", p.Name, p.Key, p.VersionID)
 		}
+	case "recoveries":
+		recs, err := s.ListCorruptions()
+		if err != nil {
+			die(err)
+		}
+		for _, r := range recs {
+			state := "resolved"
+			if r.Active {
+				state = "active"
+			}
+			fmt.Printf("%s %s damaged=%s source=%s restored=%s quarantine=%s reason=%s\n", state, r.Key, r.CorruptedVersionID, r.SourceVersionID, r.RestoredVersionID, r.QuarantinePath, r.Reason)
+		}
+	case "candidates":
+		cs, err := s.ListRecoveryCandidates(key)
+		if err != nil {
+			die(err)
+		}
+		for _, c := range cs {
+			status := "INVALID"
+			if c.Verified {
+				status = "OK"
+			}
+			fmt.Printf("%s %s size=%d sha256=%s %s\n", status, c.Manifest.VersionID, c.Manifest.Size, c.Manifest.Sha256, c.Error)
+		}
+	case "restore":
+		if len(os.Args) != 5 {
+			usage()
+		}
+		m, err := s.RestoreVersion(key, os.Args[4])
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("restored %s from %s as new current %s\n", key, os.Args[4], m.VersionID)
 	case "gc":
 		grep, err := s.CollectGarbage()
 		if err != nil {
@@ -143,7 +179,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|pin|unpin|pins|gc <root> [key] [args]")
+	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|pin|unpin|pins|gc|recoveries|candidates|restore <root> [key] [args]")
 	os.Exit(2)
 }
 
