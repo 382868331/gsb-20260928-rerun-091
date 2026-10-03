@@ -138,6 +138,9 @@ func (s *Store) recover() (RecoveryReport, error) {
 			return rep, err
 		}
 	}
+	if err := s.reconcileJournals(&rep); err != nil {
+		return rep, err
+	}
 	return rep, nil
 }
 

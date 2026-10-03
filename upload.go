@@ -248,7 +248,13 @@ func (s *Store) buildVersion(key, vid string, parts []PartInfo, uploadDir string
 func (s *Store) publish(m Manifest, expectedVersion *string) error {
 	s.pubMu.Lock()
 	defer s.pubMu.Unlock()
+	return s.publishLocked(m, expectedVersion)
+}
 
+// publishLocked is publish with the process-wide publish mutex already held
+// (used by RestoreGroup to commit a whole group inside one critical
+// section).
+func (s *Store) publishLocked(m Manifest, expectedVersion *string) error {
 	lock, err := acquireFlock(filepath.Join(s.root, "locks", "publish-"+objectID(m.Key)+".lock"))
 	if err != nil {
 		return err

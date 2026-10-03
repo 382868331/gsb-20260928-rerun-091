@@ -299,6 +299,14 @@ func (s *Store) collectObject(objID string, rep *GCReport) error {
 			rep.Items = append(rep.Items, GCItem{Key: key, VersionID: vid, Action: "retained", Reason: "pinned"})
 			continue
 		}
+		grouped, err := s.groupRefsForKey(key)
+		if err != nil {
+			return err
+		}
+		if grouped[vid] {
+			rep.Items = append(rep.Items, GCItem{Key: key, VersionID: vid, Action: "retained", Reason: "recovery point"})
+			continue
+		}
 		if s.readers[readerRef{key: key, vid: vid}] > 0 {
 			rep.Items = append(rep.Items, GCItem{Key: key, VersionID: vid, Action: "retained", Reason: "open reader"})
 			continue

@@ -110,7 +110,8 @@ Published versions are reference-counted by policy, never deleted eagerly:
 - **References**: a version is retained while it is (a) the `current` version
   of its key, (b) held by a durable named **pin** (`PinVersion` /
   `UnpinVersion`, persisted under `refs/` so snapshots survive restarts), or
-  (c) held by an **open reader** — `GetObject`/`GetVersion` register the
+  (c) recorded in a confirmed **recovery point** (see below), or (d) held by
+  an **open reader** — `GetObject`/`GetVersion` register the
   reader and `Close` releases it.
 - **Delete is a tombstone**: `DeleteObject(key)` removes the `current`
   pointer and writes a durable `deleted` marker. The key disappears from
@@ -131,6 +132,47 @@ Published versions are reference-counted by policy, never deleted eagerly:
   through the pointer update, so a version that is becoming current can never
   be swept by a concurrent GC pass.
 
+## Group recovery points
+
+A **recovery point** (`CreateRecoveryPoint`) confirms the complete state of a
+set of mutually referencing objects at one business commit: for every member
+key it durably records the exact current version id and whole-object
+checksum, plus the declared reference edges to other members (every
+referenced key must itself be a member). Capture serialises with the publish
+locks, so a write that is still in flight either commits fully before the
+capture — and is captured as a whole — or after it, and never leaks into an
+already confirmed point. Points are immutable: reusing a name fails with
+`ErrGroupExists`.
+
+- **Inspection**: `ListRecoveryPoints` / `DescribeRecoveryPoint` show every
+  member's captured version and the reference graph;
+  `DiffRecoveryPoints(a, b)` reports added/removed members and per-member
+  version and reference changes.
+- **Retention**: versions recorded in a recovery point are retained across
+  deletes and GC, exactly like pins. `DeleteRecoveryPoint` removes the point
+  and reports, per former member version, whether it is now reclaimable or
+  still occupied — and by whom (`current`, `pin:<name>`,
+  `recovery-point:<name>`, `open-reader`).
+- **Planned restore**: `PlanGroupRestore` verifies every recorded member
+  against the live tree and reports `ready` / `missing` / `corrupted`
+  before anything changes. `RestoreGroup(name, false)` fails with
+  `ErrGroupIncomplete` unless every member is restorable; with
+  `allowPartial` the caller explicitly accepts the gaps and each one is
+  recorded as a durable `gap` line in the restore journal. Members are
+  restored only from this point's own recorded versions — versions from
+  other points are never substituted to fake a complete group.
+- **Atomic visibility**: restore first verifies and stages *all* restorable
+  members as new immutable versions (`RestoredFrom` plus the journal id in
+  `GroupRestore`), and only then commits any `current` pointer, inside one
+  publish critical section.
+- **Interruption-proof**: every step is written to a durable journal under
+  `groups/journals/`. If the process dies mid-restore, the next `Open`
+  reconciles the journal against the live tree — committed members stay
+  confirmed, unfinished ones are marked `incomplete` — reports a
+  `group-restore` item in the `RecoveryReport`, and rewrites the journal
+  as `interrupted`. Completed journals are kept as restore history, and
+  quarantined corruption evidence is never touched.
+
 ## Layout
 
 ```
@@ -144,6 +186,8 @@ Published versions are reference-counted by policy, never deleted eagerly:
   staging/publish/<vid>/...                        # assembled, pre-commit
   quarantine/{upload,publish,version}/<ts>-<name>/ # isolated residue
   refs/<sha256(pin-name)>.json                     # durable pins (snapshots)
+  groups/<sha256(point-name)>.json                 # confirmed recovery points
+  groups/journals/<restore-id>.json                # durable restore journals
   trash/<ts>-<obj>-<vid>/                          # reclaimed, pending delete
   locks/                                           # flocks
 ```
@@ -183,6 +227,14 @@ go run ./cmd/objstore pin    <root> <key> <version-id> <name>
 go run ./cmd/objstore unpin  <root> <name>
 go run ./cmd/objstore pins   <root>
 go run ./cmd/objstore gc     <root>
+go run ./cmd/objstore group-create  <root> <name> <key[:ref1,ref2]>...
+go run ./cmd/objstore groups        <root>
+go run ./cmd/objstore group-show    <root> <name>
+go run ./cmd/objstore group-diff    <root> <name-a> <name-b>
+go run ./cmd/objstore group-plan    <root> <name>
+go run ./cmd/objstore group-restore <root> <name> [--partial]
+go run ./cmd/objstore group-delete  <root> <name>
+go run ./cmd/objstore group-journals <root>
 ```
 
 ## Tests

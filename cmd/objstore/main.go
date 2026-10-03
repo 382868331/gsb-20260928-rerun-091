@@ -178,14 +178,147 @@ func main() {
 		for _, it := range grep.Items {
 			fmt.Printf("%s %s %s (%s)\n", it.Action, it.Key, it.VersionID, it.Reason)
 		}
+	case "group-create":
+		// objstore group-create <root> <name> <key[:ref1,ref2]>...
+		if len(os.Args) < 5 {
+			usage()
+		}
+		var specs []localobjstore.GroupMemberSpec
+		for _, arg := range os.Args[4:] {
+			sp := localobjstore.GroupMemberSpec{Key: arg}
+			if i := indexByte(arg, ':'); i >= 0 {
+				sp.Key = arg[:i]
+				for _, r := range splitComma(arg[i+1:]) {
+					sp.Refs = append(sp.Refs, r)
+				}
+			}
+			specs = append(specs, sp)
+		}
+		rp, err := s.CreateRecoveryPoint(key, specs)
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("confirmed recovery point %q id=%s members=%d\n", rp.Name, rp.ID, len(rp.Members))
+	case "groups":
+		ps, err := s.ListRecoveryPoints()
+		if err != nil {
+			die(err)
+		}
+		for _, p := range ps {
+			fmt.Printf("%s id=%s members=%d created=%s\n", p.Name, p.ID, len(p.Members), p.CreatedAt.Format("2006-01-02T15:04:05Z"))
+		}
+	case "group-show":
+		rp, err := s.DescribeRecoveryPoint(key)
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("recovery point %q id=%s created=%s\n", rp.Name, rp.ID, rp.CreatedAt.Format("2006-01-02T15:04:05Z"))
+		for _, m := range rp.Members {
+			fmt.Printf("  %s version=%s sha256=%s refs=%v\n", m.Key, m.VersionID, m.Sha256, m.Refs)
+		}
+	case "group-diff":
+		if len(os.Args) != 5 {
+			usage()
+		}
+		d, err := s.DiffRecoveryPoints(key, os.Args[4])
+		if err != nil {
+			die(err)
+		}
+		for _, m := range d.Added {
+			fmt.Printf("+ %s version=%s\n", m.Key, m.VersionID)
+		}
+		for _, m := range d.Removed {
+			fmt.Printf("- %s version=%s\n", m.Key, m.VersionID)
+		}
+		for _, c := range d.Changed {
+			fmt.Printf("~ %s %s -> %s refs+%v refs-%v\n", c.Key, c.FromVersion, c.ToVersion, c.RefsAdded, c.RefsRemoved)
+		}
+	case "group-plan":
+		plan, err := s.PlanGroupRestore(key)
+		if err != nil {
+			die(err)
+		}
+		for _, mh := range plan.Members {
+			if mh.Status == "ready" {
+				fmt.Printf("READY     %s version=%s\n", mh.Member.Key, mh.Member.VersionID)
+			} else {
+				fmt.Printf("%-9s %s version=%s (%v)\n", mh.Status, mh.Member.Key, mh.Member.VersionID, mh.Err)
+			}
+		}
+		if plan.Complete() {
+			fmt.Println("plan: complete, all members restorable")
+		} else {
+			fmt.Println("plan: incomplete, restore needs --partial or fails")
+		}
+	case "group-restore":
+		// objstore group-restore <root> <name> [--partial]
+		partial := len(os.Args) == 5 && os.Args[4] == "--partial"
+		rep2, err := s.RestoreGroup(key, partial)
+		if err != nil {
+			for _, mh := range rep2.Plan.Members {
+				fmt.Fprintf(os.Stderr, "%s %s (%v)\n", mh.Status, mh.Member.Key, mh.Err)
+			}
+			die(err)
+		}
+		j := rep2.Journal
+		fmt.Printf("restore %s of %q: %s\n", j.ID, j.GroupName, j.Status)
+		for _, m := range j.Members {
+			fmt.Printf("  %-9s %s %s -> %s %s\n", m.Status, m.Key, m.SourceVersion, m.NewVersion, m.Reason)
+		}
+	case "group-delete":
+		drep, err := s.DeleteRecoveryPoint(key)
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("deleted recovery point %q\n", drep.Name)
+		for _, m := range drep.Released {
+			fmt.Printf("  released %s %s (now reclaimable)\n", m.Key, m.VersionID)
+		}
+		for _, r := range drep.Retained {
+			fmt.Printf("  retained %s %s held by %v\n", r.Key, r.VersionID, r.HeldBy)
+		}
+	case "group-journals":
+		js, err := s.ListRestoreJournals()
+		if err != nil {
+			die(err)
+		}
+		for _, j := range js {
+			fmt.Printf("%s group=%s status=%s started=%s\n", j.ID, j.GroupName, j.Status, j.StartedAt.Format("2006-01-02T15:04:05Z"))
+			for _, m := range j.Members {
+				fmt.Printf("  %-9s %s %s -> %s %s\n", m.Status, m.Key, m.SourceVersion, m.NewVersion, m.Reason)
+			}
+		}
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|fault|candidates|restore|pin|unpin|pins|gc <root> [key] [args]")
+	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|fault|candidates|restore|pin|unpin|pins|gc|group-create|groups|group-show|group-diff|group-plan|group-restore|group-delete|group-journals <root> [key] [args]")
 	os.Exit(2)
+}
+
+func indexByte(str string, b byte) int {
+	for i := 0; i < len(str); i++ {
+		if str[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+func splitComma(str string) []string {
+	var out []string
+	start := 0
+	for i := 0; i <= len(str); i++ {
+		if i == len(str) || str[i] == ',' {
+			if i > start {
+				out = append(out, str[start:i])
+			}
+			start = i + 1
+		}
+	}
+	return out
 }
 
 func die(err error) {

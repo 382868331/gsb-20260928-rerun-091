@@ -22,4 +22,13 @@ var (
 	// the object awaits an explicit RestoreVersion; historical versions stay
 	// readable via GetVersion but none masquerades as current.
 	ErrFaulted = errors.New("localobjstore: current version quarantined as corrupt, explicit restore required")
+
+	// ErrGroupExists indicates a recovery point with the same name is already
+	// confirmed; recovery points are immutable once confirmed.
+	ErrGroupExists = errors.New("localobjstore: recovery point already exists")
+
+	// ErrGroupIncomplete indicates a group restore was requested while some
+	// recorded members are missing or corrupt and partial restore was not
+	// explicitly accepted. Nothing is changed in this case.
+	ErrGroupIncomplete = errors.New("localobjstore: recovery point has missing or corrupt members")
 )

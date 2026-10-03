@@ -26,6 +26,10 @@ type Manifest struct {
 	// by RestoreVersion; empty for ordinary publishes. The original corrupt
 	// evidence in quarantine is never rewritten.
 	RestoredFrom string `json:"restored_from,omitempty"`
+	// GroupRestore records the restore-journal id when this manifest was
+	// created by RestoreGroup, tying the version to one recovery point's
+	// restore operation so members of different points are never mixed.
+	GroupRestore string `json:"group_restore,omitempty"`
 }
 
 // FaultRecord is the durable fact that the current version of a key was
