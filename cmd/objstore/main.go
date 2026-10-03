@@ -14,12 +14,22 @@
 //	objstore unpin <root> <name>
 //	objstore pins  <root>
 //	objstore gc    <root>
+//	objstore rp-create <root> <name> <key1,key2,...>
+//	objstore rp-list   <root>
+//	objstore rp-show   <root> <name>
+//	objstore rp-diff   <root> <name-a> <name-b>
+//	objstore rp-inspect <root> <name>
+//	objstore rp-restore <root> <name> [--partial]
+//	objstore rp-resume  <root> <restore-id>
+//	objstore rp-delete  <root> <name>
+//	objstore restores   <root>
 package main
 
 import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"localobjstore"
 )
@@ -178,13 +188,145 @@ func main() {
 		for _, it := range grep.Items {
 			fmt.Printf("%s %s %s (%s)\n", it.Action, it.Key, it.VersionID, it.Reason)
 		}
+	case "rp-create":
+		if len(os.Args) != 5 {
+			usage()
+		}
+		var members []localobjstore.RestoreMemberInput
+		for _, k := range strings.Split(os.Args[4], ",") {
+			members = append(members, localobjstore.RestoreMemberInput{Key: k})
+		}
+		rp, err := s.CreateRestorePoint(key, members)
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("created restore point %q id=%s members=%d\n", rp.Name, rp.ID, len(rp.Members))
+	case "rp-list":
+		points, err := s.ListRestorePoints()
+		if err != nil {
+			die(err)
+		}
+		for _, rp := range points {
+			fmt.Printf("%s id=%s members=%d created=%s\n", rp.Name, rp.ID, len(rp.Members), rp.CreatedAt.Format("2006-01-02T15:04:05Z"))
+		}
+	case "rp-show":
+		if key == "" {
+			usage()
+		}
+		rp, err := s.GetRestorePoint(key)
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("restore point %q id=%s created=%s\n", rp.Name, rp.ID, rp.CreatedAt.Format("2006-01-02T15:04:05Z"))
+		for _, m := range rp.Members {
+			refs := "-"
+			if len(m.References) > 0 {
+				refs = strings.Join(m.References, ",")
+			}
+			fmt.Printf("  %s version=%s refs=%s\n", m.Key, m.VersionID, refs)
+		}
+	case "rp-diff":
+		if len(os.Args) != 5 {
+			usage()
+		}
+		changes, err := s.DiffRestorePoints(key, os.Args[4])
+		if err != nil {
+			die(err)
+		}
+		if len(changes) == 0 {
+			fmt.Println("no differences")
+		}
+		for _, c := range changes {
+			switch c.Change {
+			case "added":
+				fmt.Printf("added   %s -> %s\n", c.Key, c.ToVersion)
+			case "removed":
+				fmt.Printf("removed %s <- %s\n", c.Key, c.FromVersion)
+			default:
+				fmt.Printf("changed %s %s -> %s\n", c.Key, c.FromVersion, c.ToVersion)
+			}
+		}
+	case "rp-inspect":
+		if key == "" {
+			usage()
+		}
+		plan, err := s.InspectRestorePoint(key)
+		if err != nil {
+			die(err)
+		}
+		for _, h := range plan.Members {
+			if h.Status == "readable" {
+				fmt.Printf("OK        %s %s\n", h.Key, h.VersionID)
+			} else {
+				fmt.Printf("%-9s %s %s (%v)\n", strings.ToUpper(h.Status), h.Key, h.VersionID, h.Err)
+			}
+		}
+		if plan.Complete {
+			fmt.Println("complete: full restore possible")
+		} else {
+			fmt.Println("incomplete: full restore will fail; partial restore leaves gaps")
+		}
+	case "rp-restore":
+		if key == "" {
+			usage()
+		}
+		var opts *localobjstore.RestoreOptions
+		if len(os.Args) == 5 && os.Args[4] == "--partial" {
+			opts = &localobjstore.RestoreOptions{AllowPartial: true}
+		}
+		rec, err := s.RestorePoint(key, opts)
+		if err != nil {
+			die(err)
+		}
+		printRestore(rec)
+	case "rp-resume":
+		if key == "" {
+			usage()
+		}
+		rec, err := s.ResumeRestore(key)
+		if err != nil {
+			die(err)
+		}
+		printRestore(rec)
+	case "rp-delete":
+		if key == "" {
+			usage()
+		}
+		drep, err := s.DeleteRestorePoint(key)
+		if err != nil {
+			die(err)
+		}
+		for _, m := range drep.Retained {
+			fmt.Printf("retained %s %s (%s)\n", m.Key, m.VersionID, strings.Join(m.Reasons, ", "))
+		}
+		for _, m := range drep.Released {
+			fmt.Printf("released %s %s (reclaimable by gc)\n", m.Key, m.VersionID)
+		}
+	case "restores":
+		recs, err := s.ListRestores()
+		if err != nil {
+			die(err)
+		}
+		for _, rec := range recs {
+			fmt.Printf("%s point=%s state=%s\n", rec.ID, rec.PointName, rec.State)
+		}
 	default:
 		usage()
 	}
 }
+func printRestore(rec localobjstore.RestoreRecord) {
+	fmt.Printf("restore %s point=%q state=%s\n", rec.ID, rec.PointName, rec.State)
+	for _, m := range rec.Members {
+		line := fmt.Sprintf("  %-9s %s %s", m.State, m.Key, m.VersionID)
+		if m.Reason != "" {
+			line += " (" + m.Reason + ")"
+		}
+		fmt.Println(line)
+	}
+}
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|fault|candidates|restore|pin|unpin|pins|gc <root> [key] [args]")
+	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|fault|candidates|restore|pin|unpin|pins|gc|rp-create|rp-list|rp-show|rp-diff|rp-inspect|rp-restore|rp-resume|rp-delete|restores <root> [key] [args]")
 	os.Exit(2)
 }
 

@@ -131,6 +131,55 @@ Published versions are reference-counted by policy, never deleted eagerly:
   through the pointer update, so a version that is becoming current can never
   be swept by a concurrent GC pass.
 
+## Group restore points
+
+A **restore point** captures a group of mutually-referencing objects as
+they were at one business commit: `CreateRestorePoint(name, members)`
+records, for every member key, the exact immutable current version plus the
+declared reference edges to other members. The capture serialises with
+publishes (per-key locks in deterministic order), so the group is always
+consistent; a key with an unfinished upload in this process is rejected
+with `ErrRestoreInFlight` instead of being silently captured at its
+pre-upload version. The point is committed with a single atomic rename, so
+a crash mid-create leaves only a temp file that recovery discards — never a
+half-written, half-visible restore point. Once confirmed a point is
+immutable: later publishes create new versions that are not members, so
+in-flight writes can never silently join a confirmed restore point.
+
+- **Inspect**: `GetRestorePoint` / `ListRestorePoints` show the member
+  versions and reference edges; `DiffRestorePoints(a, b)` reports added,
+  removed and version-changed members between two points.
+- **Preview before restore**: `InspectRestorePoint(name)` fully verifies
+  every member version and classifies it as `readable`, `corrupted` or
+  `missing`, without changing anything.
+- **Full restore**: `RestorePoint(name, nil)` fails with
+  `ErrRestoreMembersUnavailable` before touching anything unless every
+  member is available and verified. Each member is switched to exactly the
+  version recorded in the point — never a version from another point — so
+  readers can never observe a group stitched together from different
+  restore points. Tombstones and fault markers on restored keys are lifted
+  because the restored current version is known-good.
+- **Partial restore**: `RestorePoint(name, &RestoreOptions{AllowPartial:
+  true})` restores the readable members and records a durable `gap` marker
+  (with the reason) for every unavailable one; gapped keys are left exactly
+  as they were. The record ends in state `completed-with-gaps`.
+- **Durable journal**: every restore writes a journal under `restores/`
+  before the first member becomes visible and rewrites it atomically as
+  each member is confirmed. If the process stops mid-restore, the next
+  `Open` marks the record `interrupted` (confirmed members keep their
+  state and timestamps, pending ones stay pending) and reports it in the
+  `RecoveryReport`; `ResumeRestore(id)` finishes exactly the recorded
+  plan, turning members whose versions have since vanished into gaps.
+  `ListRestores` / `RestoreStatus` expose the full history, and the
+  quarantined corruption evidence is never rewritten.
+- **Deletion**: `DeleteRestorePoint(name)` removes the point and reports,
+  per member version, whether it is still occupied — by the current
+  pointer, a pin, another restore point, an open reader or a pending group
+  restore — or released for the next `CollectGarbage` pass. Versions
+  referenced by any restore point (or needed by an unfinished restore) are
+  retained by GC, so a restore source can never be reclaimed out from
+  under a recovery.
+
 ## Layout
 
 ```

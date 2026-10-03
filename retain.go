@@ -299,6 +299,22 @@ func (s *Store) collectObject(objID string, rep *GCReport) error {
 			rep.Items = append(rep.Items, GCItem{Key: key, VersionID: vid, Action: "retained", Reason: "pinned"})
 			continue
 		}
+		inPoint, err := s.restorePointsForKey(key)
+		if err != nil {
+			return err
+		}
+		if inPoint[vid] {
+			rep.Items = append(rep.Items, GCItem{Key: key, VersionID: vid, Action: "retained", Reason: "restore point member"})
+			continue
+		}
+		pendingRestore, err := s.pendingRestoreRefs(key)
+		if err != nil {
+			return err
+		}
+		if pendingRestore[vid] {
+			rep.Items = append(rep.Items, GCItem{Key: key, VersionID: vid, Action: "retained", Reason: "pending group restore"})
+			continue
+		}
 		if s.readers[readerRef{key: key, vid: vid}] > 0 {
 			rep.Items = append(rep.Items, GCItem{Key: key, VersionID: vid, Action: "retained", Reason: "open reader"})
 			continue

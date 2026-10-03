@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,24 @@ func (s *Store) recover() (RecoveryReport, error) {
 			Kind: "trash", Path: e.Name(), Action: "discarded",
 			Reason: "interrupted garbage collection",
 		})
+	}
+
+	// Discard temp files from interrupted atomic writes in restorepoints/
+	// and restores/: an unconfirmed restore point never becomes visible,
+	// and an interrupted journal rewrite keeps its last committed state.
+	for _, dir := range []string{s.restorePointsDir(), s.restoresDir()} {
+		tmps, _ := os.ReadDir(dir)
+		for _, e := range tmps {
+			if e.IsDir() || !strings.HasPrefix(e.Name(), ".tmp-") {
+				continue
+			}
+			if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+				rep.Items = append(rep.Items, RecoveryItem{
+					Kind: "restore-meta", Path: filepath.Join(dir, e.Name()), Action: "discarded",
+					Reason: "uncommitted restore metadata write",
+				})
+			}
+		}
 	}
 
 	upRoot := filepath.Join(s.root, "staging", "uploads")
@@ -138,7 +157,45 @@ func (s *Store) recover() (RecoveryReport, error) {
 			return rep, err
 		}
 	}
+	if err := s.recoverRestores(&rep); err != nil {
+		return rep, err
+	}
 	return rep, nil
+}
+
+// recoverRestores marks every group restore that was in progress when the
+// store stopped as "interrupted". Confirmed members keep their confirmed
+// state and timestamps; pending members stay pending, so after reopening
+// the operator can tell finished results from unfinished operations and
+// complete the restore explicitly with ResumeRestore. Nothing is rolled
+// back or silently completed.
+func (s *Store) recoverRestores(rep *RecoveryReport) error {
+	recs, err := s.ListRestores()
+	if err != nil {
+		return err
+	}
+	for i := range recs {
+		rec := &recs[i]
+		if rec.State != "in-progress" {
+			continue
+		}
+		rec.State = "interrupted"
+		rec.Interrupted = true
+		if err := s.writeRestoreRecord(rec); err != nil {
+			return err
+		}
+		pending := 0
+		for _, m := range rec.Members {
+			if m.State == "pending" {
+				pending++
+			}
+		}
+		rep.Items = append(rep.Items, RecoveryItem{
+			Kind: "restore", Path: rec.ID, Action: "marked-interrupted",
+			Reason: fmt.Sprintf("group restore of %q stopped with %d member(s) pending; resume with ResumeRestore(%s)", rec.PointName, pending, rec.ID),
+		})
+	}
+	return nil
 }
 
 // repairCurrent ensures current points to an existing valid version.

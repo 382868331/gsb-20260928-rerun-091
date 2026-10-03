@@ -22,4 +22,19 @@ var (
 	// the object awaits an explicit RestoreVersion; historical versions stay
 	// readable via GetVersion but none masquerades as current.
 	ErrFaulted = errors.New("localobjstore: current version quarantined as corrupt, explicit restore required")
+
+	// ErrRestorePointExists indicates a restore point name is already taken;
+	// confirmed restore points are immutable and cannot be overwritten.
+	ErrRestorePointExists = errors.New("localobjstore: restore point already exists")
+
+	// ErrRestoreInFlight indicates a member key has an unfinished upload in
+	// this process; the restore point would silently capture pre-upload
+	// content, so creation is refused instead.
+	ErrRestoreInFlight = errors.New("localobjstore: member object is being written")
+
+	// ErrRestoreMembersUnavailable indicates a full group restore was
+	// requested while some members are missing or corrupted; nothing was
+	// changed. Inspect the restore point and either fix the members or
+	// explicitly request a partial restore with gap markers.
+	ErrRestoreMembersUnavailable = errors.New("localobjstore: restore point members unavailable")
 )
