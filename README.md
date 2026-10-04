@@ -147,8 +147,17 @@ immutable: later publishes create new versions that are not members, so
 in-flight writes can never silently join a confirmed restore point.
 
 - **Inspect**: `GetRestorePoint` / `ListRestorePoints` show the member
-  versions and reference edges; `DiffRestorePoints(a, b)` reports added,
-  removed and version-changed members between two points.
+  versions and reference edges; `DiffRestorePoints(a, b)` returns a
+  `RestorePointDiff` carrying both points verbatim plus member changes
+  (added, removed and version-changed keys) and reference-edge changes:
+  edges added in the second point, edges removed from it, and edges whose
+  direction reversed (`a -> b` becoming `b -> a`). References are compared
+  as sets, so the same topology declared in a different order reports no
+  changes. The comparison reads only the two point files — it never opens
+  member objects or writes anything — so it stays stable after a confirmed
+  restore and keeps the recorded edges even when a member version is
+  missing or corrupted, instead of mistaking unreadability for a missing
+  relationship.
 - **Preview before restore**: `InspectRestorePoint(name)` fully verifies
   every member version and classifies it as `readable`, `corrupted` or
   `missing`, without changing anything.
