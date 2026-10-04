@@ -147,8 +147,12 @@ immutable: later publishes create new versions that are not members, so
 in-flight writes can never silently join a confirmed restore point.
 
 - **Inspect**: `GetRestorePoint` / `ListRestorePoints` show the member
-  versions and reference edges; `DiffRestorePoints(a, b)` reports added,
-  removed and version-changed members between two points.
+  versions and reference edges; `DiffRestorePoints(a, b)` reports both
+  member-version changes and directed reference changes. References are set
+  compared, so declaration order does not matter, and reversing an edge is
+  reported distinctly from deleting and adding unrelated edges. Comparison
+  reads point metadata only and never treats unreadable member data as a
+  missing reference.
 - **Preview before restore**: `InspectRestorePoint(name)` fully verifies
   every member version and classifies it as `readable`, `corrupted` or
   `missing`, without changing anything.

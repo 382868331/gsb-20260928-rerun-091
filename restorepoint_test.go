@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -148,22 +149,175 @@ func TestRestorePointDiff(t *testing.T) {
 	if _, err := s.CreateRestorePoint("p2", []RestoreMemberInput{{Key: "keep"}, {Key: "chg"}, {Key: "new"}}); err != nil {
 		t.Fatal(err)
 	}
-	changes, err := s.DiffRestorePoints("p1", "p2")
+	diff, err := s.DiffRestorePoints("p1", "p2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(changes) != 3 {
-		t.Fatalf("changes=%v", changes)
+	if len(diff.Members) != 3 || len(diff.References) != 0 {
+		t.Fatalf("diff=%+v", diff)
 	}
 	byKey := map[string]MemberChange{}
-	for _, c := range changes {
+	for _, c := range diff.Members {
 		byKey[c.Key] = c
 	}
 	if byKey["chg"].Change != "changed" || byKey["new"].Change != "added" || byKey["gone"].Change != "removed" {
-		t.Fatalf("wrong diff: %+v", changes)
+		t.Fatalf("wrong diff: %+v", diff.Members)
 	}
 	if byKey["chg"].FromVersion == "" || byKey["chg"].ToVersion == "" || byKey["chg"].FromVersion == byKey["chg"].ToVersion {
 		t.Fatalf("changed versions not recorded: %+v", byKey["chg"])
+	}
+}
+
+func TestRestorePointDiffReferencesDirectionAndOrder(t *testing.T) {
+	s, _ := openTemp(t)
+	putStr(t, s, "a", "1")
+	putStr(t, s, "b", "1")
+	putStr(t, s, "c", "1")
+	if _, err := s.CreateRestorePoint("p1", []RestoreMemberInput{
+		{Key: "a", References: []string{"b", "c"}},
+		{Key: "b"},
+		{Key: "c"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateRestorePoint("p2", []RestoreMemberInput{
+		{Key: "c"},
+		{Key: "b", References: []string{"a", "c"}},
+		{Key: "a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateRestorePoint("same-edges", []RestoreMemberInput{
+		{Key: "b"},
+		{Key: "c"},
+		{Key: "a", References: []string{"c", "b"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	diff, err := s.DiffRestorePoints("p1", "p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.Members) != 0 {
+		t.Fatalf("same member versions changed: %+v", diff.Members)
+	}
+	wantRefs := []ReferenceChange{
+		{Change: "added", NewFromKey: "b", NewToKey: "c"},
+		{Change: "removed", FromKey: "a", ToKey: "c"},
+		{Change: "reversed", FromKey: "a", ToKey: "b", NewFromKey: "b", NewToKey: "a"},
+	}
+	if !reflect.DeepEqual(diff.References, wantRefs) {
+		t.Fatalf("references=%+v want %+v", diff.References, wantRefs)
+	}
+
+	same, err := s.DiffRestorePoints("p1", "same-edges")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(same.Members) != 0 || len(same.References) != 0 {
+		t.Fatalf("order/duplicates caused differences: %+v", same)
+	}
+}
+
+func TestRestorePointDiffDoesNotTouchPointsOrReadMembers(t *testing.T) {
+	s, dir := openTemp(t)
+	a := putStr(t, s, "a", "1")
+	b := putStr(t, s, "b", "1")
+	if _, err := s.CreateRestorePoint("p1", []RestoreMemberInput{
+		{Key: "a", References: []string{"b"}},
+		{Key: "b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateRestorePoint("p2", []RestoreMemberInput{
+		{Key: "a"},
+		{Key: "b", References: []string{"a"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p1Path := s.restorePointPath("p1")
+	p2Path := s.restorePointPath("p2")
+	before1, err := os.ReadFile(p1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before2, err := os.ReadFile(p2Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corruptVersion(t, dir, "a", a.VersionID, 1)
+	bDir := filepath.Join(dir, "objects", objectID("b"), "versions", b.VersionID)
+	if err := os.Chmod(filepath.Join(bDir, "data", "000001"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(bDir); err != nil {
+		t.Fatal(err)
+	}
+
+	diff, err := s.DiffRestorePoints("p1", "p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.Members) != 0 {
+		t.Fatalf("metadata comparison reported version changes: %+v", diff.Members)
+	}
+	if len(diff.References) != 1 || diff.References[0].Change != "reversed" {
+		t.Fatalf("references not preserved through unreadable members: %+v", diff.References)
+	}
+	after1, err := os.ReadFile(p1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after2, err := os.ReadFile(p2Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before1, after1) || !bytes.Equal(before2, after2) {
+		t.Fatal("comparison modified restore point metadata")
+	}
+}
+
+func TestRestorePointDiffStableAfterRestore(t *testing.T) {
+	s, _ := openTemp(t)
+	a1 := putStr(t, s, "a", "a1")
+	b1 := putStr(t, s, "b", "b1")
+	if _, err := s.CreateRestorePoint("p1", []RestoreMemberInput{
+		{Key: "a", References: []string{"b"}},
+		{Key: "b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateRestorePoint("p2", []RestoreMemberInput{
+		{Key: "a"},
+		{Key: "b", References: []string{"a"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.DiffRestorePoints("p1", "p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	putStr(t, s, "a", "a2")
+	putStr(t, s, "b", "b2")
+	if _, err := s.RestorePoint("p1", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	p1, err := s.GetRestorePoint("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1.Members[0].VersionID != a1.VersionID || p1.Members[1].VersionID != b1.VersionID {
+		t.Fatalf("restore changed point versions: %+v", p1.Members)
+	}
+	after, err := s.DiffRestorePoints("p1", "p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("diff changed after restore:\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
 

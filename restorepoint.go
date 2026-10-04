@@ -47,6 +47,24 @@ type MemberChange struct {
 	ToVersion   string // set for "changed" and "added"
 }
 
+// ReferenceChange describes one directed reference-edge difference between
+// restore points. A reversed edge is represented as one "reversed" change
+// rather than a deletion and an unrelated addition.
+type ReferenceChange struct {
+	Change     string // "added" | "removed" | "reversed"
+	FromKey    string // source in restore point A; empty for "added"
+	ToKey      string // target in restore point A; empty for "added"
+	NewFromKey string // source in restore point B; empty for "removed"
+	NewToKey   string // target in restore point B; empty for "removed"
+}
+
+// RestorePointDiff contains both member-version and reference-topology
+// differences between two restore points.
+type RestorePointDiff struct {
+	Members    []MemberChange
+	References []ReferenceChange
+}
+
 // MemberHealth is the availability check of one restore point member.
 type MemberHealth struct {
 	Key       string
@@ -250,16 +268,19 @@ func (s *Store) ListRestorePoints() ([]RestorePoint, error) {
 	return out, nil
 }
 
-// DiffRestorePoints compares two restore points member by member, reporting
-// added, removed and version-changed keys, sorted by key.
-func (s *Store) DiffRestorePoints(aName, bName string) ([]MemberChange, error) {
+// DiffRestorePoints compares two immutable restore-point descriptions. It
+// reads only their metadata: member data is never verified or modified, so
+// missing or corrupted member versions cannot erase recorded references.
+// References are compared as a directed set, so declaration order and
+// duplicate declarations do not affect the result.
+func (s *Store) DiffRestorePoints(aName, bName string) (RestorePointDiff, error) {
 	a, err := s.GetRestorePoint(aName)
 	if err != nil {
-		return nil, err
+		return RestorePointDiff{}, err
 	}
 	b, err := s.GetRestorePoint(bName)
 	if err != nil {
-		return nil, err
+		return RestorePointDiff{}, err
 	}
 	am := make(map[string]string, len(a.Members))
 	for _, m := range a.Members {
@@ -269,23 +290,94 @@ func (s *Store) DiffRestorePoints(aName, bName string) ([]MemberChange, error) {
 	for _, m := range b.Members {
 		bm[m.Key] = m.VersionID
 	}
-	var changes []MemberChange
+	var diff RestorePointDiff
 	for key, av := range am {
 		bv, ok := bm[key]
 		switch {
 		case !ok:
-			changes = append(changes, MemberChange{Key: key, Change: "removed", FromVersion: av})
+			diff.Members = append(diff.Members, MemberChange{Key: key, Change: "removed", FromVersion: av})
 		case bv != av:
-			changes = append(changes, MemberChange{Key: key, Change: "changed", FromVersion: av, ToVersion: bv})
+			diff.Members = append(diff.Members, MemberChange{Key: key, Change: "changed", FromVersion: av, ToVersion: bv})
 		}
 	}
 	for key, bv := range bm {
 		if _, ok := am[key]; !ok {
-			changes = append(changes, MemberChange{Key: key, Change: "added", ToVersion: bv})
+			diff.Members = append(diff.Members, MemberChange{Key: key, Change: "added", ToVersion: bv})
 		}
 	}
-	sort.Slice(changes, func(i, j int) bool { return changes[i].Key < changes[j].Key })
-	return changes, nil
+	sort.Slice(diff.Members, func(i, j int) bool { return diff.Members[i].Key < diff.Members[j].Key })
+
+	type referenceEdge struct {
+		from string
+		to   string
+	}
+	edgeSets := func(point RestorePoint) (map[referenceEdge]bool, map[referenceEdge]bool) {
+		forward := make(map[referenceEdge]bool)
+		reverse := make(map[referenceEdge]bool)
+		for _, m := range point.Members {
+			for _, target := range m.References {
+				edge := referenceEdge{from: m.Key, to: target}
+				forward[edge] = true
+				reverse[referenceEdge{from: target, to: m.Key}] = true
+			}
+		}
+		return forward, reverse
+	}
+	aEdges, aReverse := edgeSets(a)
+	bEdges, bReverse := edgeSets(b)
+	matchedB := make(map[referenceEdge]bool)
+	for edge := range aEdges {
+		reversed := referenceEdge{from: edge.to, to: edge.from}
+		if !bEdges[edge] && bEdges[reversed] && !aEdges[reversed] && !matchedB[reversed] {
+			diff.References = append(diff.References, ReferenceChange{
+				Change:     "reversed",
+				FromKey:    edge.from,
+				ToKey:      edge.to,
+				NewFromKey: reversed.from,
+				NewToKey:   reversed.to,
+			})
+			matchedB[reversed] = true
+			continue
+		}
+		if !bEdges[edge] {
+			diff.References = append(diff.References, ReferenceChange{
+				Change:  "removed",
+				FromKey: edge.from,
+				ToKey:   edge.to,
+			})
+		}
+	}
+	for edge := range bEdges {
+		if aEdges[edge] || matchedB[edge] {
+			continue
+		}
+		if aReverse[edge] && !bReverse[edge] {
+			continue
+		}
+		diff.References = append(diff.References, ReferenceChange{
+			Change:     "added",
+			NewFromKey: edge.from,
+			NewToKey:   edge.to,
+		})
+	}
+	sort.Slice(diff.References, func(i, j int) bool {
+		left := diff.References[i]
+		right := diff.References[j]
+		if left.Change != right.Change {
+			return left.Change < right.Change
+		}
+		if left.FromKey != right.FromKey {
+			return left.FromKey < right.FromKey
+		}
+		if left.ToKey != right.ToKey {
+			return left.ToKey < right.ToKey
+		}
+		if left.NewFromKey != right.NewFromKey {
+			return left.NewFromKey < right.NewFromKey
+		}
+		return left.NewToKey < right.NewToKey
+	})
+	return diff, nil
 }
 
 // InspectRestorePoint previews a group restore: every member version is

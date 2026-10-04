@@ -229,14 +229,14 @@ func main() {
 		if len(os.Args) != 5 {
 			usage()
 		}
-		changes, err := s.DiffRestorePoints(key, os.Args[4])
+		diff, err := s.DiffRestorePoints(key, os.Args[4])
 		if err != nil {
 			die(err)
 		}
-		if len(changes) == 0 {
+		if len(diff.Members) == 0 && len(diff.References) == 0 {
 			fmt.Println("no differences")
 		}
-		for _, c := range changes {
+		for _, c := range diff.Members {
 			switch c.Change {
 			case "added":
 				fmt.Printf("added   %s -> %s\n", c.Key, c.ToVersion)
@@ -244,6 +244,16 @@ func main() {
 				fmt.Printf("removed %s <- %s\n", c.Key, c.FromVersion)
 			default:
 				fmt.Printf("changed %s %s -> %s\n", c.Key, c.FromVersion, c.ToVersion)
+			}
+		}
+		for _, r := range diff.References {
+			switch r.Change {
+			case "added":
+				fmt.Printf("ref added   %s -> %s\n", r.NewFromKey, r.NewToKey)
+			case "removed":
+				fmt.Printf("ref removed %s -> %s\n", r.FromKey, r.ToKey)
+			case "reversed":
+				fmt.Printf("ref reversed %s -> %s becomes %s -> %s\n", r.FromKey, r.ToKey, r.NewFromKey, r.NewToKey)
 			}
 		}
 	case "rp-inspect":
