@@ -37,4 +37,8 @@ var (
 	// changed. Inspect the restore point and either fix the members or
 	// explicitly request a partial restore with gap markers.
 	ErrRestoreMembersUnavailable = errors.New("localobjstore: restore point members unavailable")
+
+	// ErrImpactAnalysisExists indicates an impact analysis name is already
+	// taken; saved analyses are immutable and cannot be overwritten.
+	ErrImpactAnalysisExists = errors.New("localobjstore: impact analysis already exists")
 )

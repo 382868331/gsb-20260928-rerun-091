@@ -33,10 +33,11 @@ func (s *Store) recover() (RecoveryReport, error) {
 		})
 	}
 
-	// Discard temp files from interrupted atomic writes in restorepoints/
-	// and restores/: an unconfirmed restore point never becomes visible,
-	// and an interrupted journal rewrite keeps its last committed state.
-	for _, dir := range []string{s.restorePointsDir(), s.restoresDir()} {
+	// Discard temp files from interrupted atomic writes in restorepoints/,
+	// restores/ and analyses/: an unconfirmed restore point or impact
+	// analysis never becomes visible, and an interrupted journal rewrite
+	// keeps its last committed state.
+	for _, dir := range []string{s.restorePointsDir(), s.restoresDir(), s.analysesDir()} {
 		tmps, _ := os.ReadDir(dir)
 		for _, e := range tmps {
 			if e.IsDir() || !strings.HasPrefix(e.Name(), ".tmp-") {

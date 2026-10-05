@@ -23,6 +23,10 @@
 //	objstore rp-resume  <root> <restore-id>
 //	objstore rp-delete  <root> <name>
 //	objstore restores   <root>
+//	objstore impact-create <root> <name> <point>=<entry1,entry2> [<point>=<entry1,...>]
+//	objstore impact-list   <root>
+//	objstore impact-show   <root> <name>
+//	objstore impact-export <root> <name> <point> <key1,key2,...>
 package main
 
 import (
@@ -320,6 +324,55 @@ func main() {
 		for _, rec := range recs {
 			fmt.Printf("%s point=%s state=%s\n", rec.ID, rec.PointName, rec.State)
 		}
+
+	case "impact-create":
+		if len(os.Args) < 5 {
+			usage()
+		}
+		var queries []localobjstore.ImpactQuery
+		for _, spec := range os.Args[4:] {
+			point, entries, ok := strings.Cut(spec, "=")
+			if !ok || point == "" || entries == "" {
+				usage()
+			}
+			queries = append(queries, localobjstore.ImpactQuery{Point: point, Entries: strings.Split(entries, ",")})
+		}
+		an, err := s.CreateImpactAnalysis(key, queries...)
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("created impact analysis %q id=%s sides=%d\n", an.Name, an.ID, len(an.Sides))
+	case "impact-list":
+		ans, err := s.ListImpactAnalyses()
+		if err != nil {
+			die(err)
+		}
+		for _, an := range ans {
+			fmt.Printf("%s id=%s sides=%d created=%s\n", an.Name, an.ID, len(an.Sides), an.CreatedAt.Format("2006-01-02T15:04:05Z"))
+		}
+	case "impact-show":
+		if key == "" {
+			usage()
+		}
+		an, err := s.GetImpactAnalysis(key)
+		if err != nil {
+			die(err)
+		}
+		printImpact(an)
+	case "impact-export":
+		if len(os.Args) != 6 {
+			usage()
+		}
+		exp, err := s.ExportImpactScope(key, os.Args[4], strings.Split(os.Args[5], ","))
+		if err != nil {
+			die(err)
+		}
+		for _, m := range exp.Members {
+			fmt.Printf("member %s %s\n", m.Key, m.VersionID)
+		}
+		for _, c := range exp.CrossBoundaryReferences {
+			fmt.Printf("not included: %s -> %s (cross-boundary reference)\n", c.From, c.To)
+		}
 	default:
 		usage()
 	}
@@ -336,11 +389,41 @@ func printRestore(rec localobjstore.RestoreRecord) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|fault|candidates|restore|pin|unpin|pins|gc|rp-create|rp-list|rp-show|rp-diff|rp-inspect|rp-restore|rp-resume|rp-delete|restores <root> [key] [args]")
+	fmt.Fprintln(os.Stderr, "usage: objstore put|get|info|verify|delete|fault|candidates|restore|pin|unpin|pins|gc|rp-create|rp-list|rp-show|rp-diff|rp-inspect|rp-restore|rp-resume|rp-delete|restores|impact-create|impact-list|impact-show|impact-export <root> [key] [args]")
 	os.Exit(2)
 }
 
 func die(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
+}
+
+func printImpact(an localobjstore.ImpactAnalysis) {
+	fmt.Printf("impact analysis %q id=%s created=%s\n", an.Name, an.ID, an.CreatedAt.Format("2006-01-02T15:04:05Z"))
+	for _, side := range an.Sides {
+		fmt.Printf("point %q entries=%s\n", side.Query.Point, strings.Join(side.Query.Entries, ","))
+		for _, n := range side.Scope {
+			kind := "dependency"
+			if n.Direct {
+				kind = "direct"
+			}
+			fmt.Printf("  %-10s %-9s %s %s\n", kind, n.Status, n.Key, n.VersionID)
+			for _, p := range n.Paths {
+				fmt.Printf("    path %s\n", strings.Join(p, " -> "))
+			}
+		}
+	}
+	for _, c := range an.Common {
+		rec := ""
+		if c.Recoverable {
+			rec = " (recoverable)"
+		}
+		fmt.Printf("common %s %s/%s%s\n", c.Key, c.StatusA, c.StatusB, rec)
+	}
+	for _, k := range an.MissingA {
+		fmt.Printf("missing on first side: %s\n", k)
+	}
+	for _, k := range an.MissingB {
+		fmt.Printf("missing on second side: %s\n", k)
+	}
 }

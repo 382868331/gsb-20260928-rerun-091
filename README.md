@@ -189,6 +189,51 @@ in-flight writes can never silently join a confirmed restore point.
   retained by GC, so a restore source can never be reclaimed out from
   under a recovery.
 
+## Object-entry impact analysis
+
+An **impact analysis** answers "what does this business object pull into
+the recoverable scope?" without touching anything:
+`CreateImpactAnalysis(name, queries...)` takes one or two
+`ImpactQuery{Point, Entries}` values — each restore point with its own
+business entry objects — and traverses only the directed references the
+points actually recorded.
+
+- **Direct vs dependency impact**: with two queries, an object whose
+  captured version was added, removed or replaced between the points is
+  marked `Direct`; every other reached object is only affected through
+  its dependencies. `Paths` shows every relationship path from an
+  entry to each affected object.
+- **Cycles preserved, scope counted once**: reference cycles appear in
+  the recorded paths as a path whose last key repeats an earlier one,
+  but traversal never follows a cycle twice, so every object enters the
+  scope exactly once and the walk always terminates.
+- **Common scope and missing dependencies**: with two queries the report
+  lists the objects reachable from both sides' entries (with both
+  versions and whether both are readable) plus the dependencies each
+  side's scope is missing relative to the other.
+- **Structure vs content availability**: the scope and paths come from
+  the recorded edges alone; each node's `Status`
+  (readable/corrupted/missing) is verified separately, so an unreadable
+  member keeps its structural place in the graph.
+- **Read-only and durable**: the query never modifies restore points or
+  restores objects. The analysis is committed atomically under
+  `analyses/` and is immutable: reopening the store shows the same
+  analysis and restore points created later cannot change it.
+  `GetImpactAnalysis` / `ListImpactAnalyses` read it back.
+- **Export**: `ExportImpactScope(analysis, point, keys)` returns the
+  recorded members of a selected scope and explicitly lists every
+  recorded reference that crosses the selection boundary
+  (`CrossBoundaryReferences`) because its target is not included.
+
+CLI:
+
+```
+go run ./cmd/objstore impact-create <root> <name> <pointA>=<e1,e2> [<pointB>=<e3,...>]
+go run ./cmd/objstore impact-list   <root>
+go run ./cmd/objstore impact-show   <root> <name>
+go run ./cmd/objstore impact-export <root> <name> <point> <k1,k2,...>
+```
+
 ## Layout
 
 ```
@@ -204,6 +249,7 @@ in-flight writes can never silently join a confirmed restore point.
   refs/<sha256(pin-name)>.json                     # durable pins (snapshots)
   trash/<ts>-<obj>-<vid>/                          # reclaimed, pending delete
   locks/                                           # flocks
+  analyses/<sha256(name)>.json                     # saved impact analyses
 ```
 
 ## Usage
