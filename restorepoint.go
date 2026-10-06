@@ -118,6 +118,27 @@ func (s *Store) restorePointPath(name string) string {
 	return filepath.Join(s.restorePointsDir(), objectID(name)+".json")
 }
 
+// checkMemberContent fully verifies one member version (structure +
+// checksums) and classifies it as "readable", "corrupted" or "missing".
+// It only reads; nothing is modified.
+func (s *Store) checkMemberContent(key, versionID string) (string, error) {
+	vdir := filepath.Join(s.versionsDir(key), versionID)
+	if _, err := os.Stat(vdir); errors.Is(err, os.ErrNotExist) {
+		return "missing", fmt.Errorf("%w: version %s of %s", ErrNotFound, versionID, key)
+	}
+	if err := s.validateVersionStructure(key, versionID); err != nil {
+		return "corrupted", err
+	}
+	mf, err := s.loadManifest(key, versionID)
+	if err != nil {
+		return "corrupted", err
+	}
+	if err := verifyDirBytes(vdir, mf); err != nil {
+		return "corrupted", err
+	}
+	return "readable", nil
+}
+
 // CreateRestorePoint captures the current version of every member key as
 // one named, immutable group snapshot. The capture serialises with
 // publishes (per-key locks, in deterministic order), so the group always
@@ -401,20 +422,7 @@ func (s *Store) InspectRestorePoint(name string) (RestorePlan, error) {
 	plan := RestorePlan{Point: rp, Complete: true}
 	for _, m := range rp.Members {
 		h := MemberHealth{Key: m.Key, VersionID: m.VersionID, Status: "readable"}
-		vdir := filepath.Join(s.versionsDir(m.Key), m.VersionID)
-		if _, err := os.Stat(vdir); errors.Is(err, os.ErrNotExist) {
-			h.Status = "missing"
-			h.Err = fmt.Errorf("%w: version %s of %s", ErrNotFound, m.VersionID, m.Key)
-		} else if err := s.validateVersionStructure(m.Key, m.VersionID); err != nil {
-			h.Status = "corrupted"
-			h.Err = err
-		} else if mf, err := s.loadManifest(m.Key, m.VersionID); err != nil {
-			h.Status = "corrupted"
-			h.Err = err
-		} else if err := verifyDirBytes(vdir, mf); err != nil {
-			h.Status = "corrupted"
-			h.Err = err
-		}
+		h.Status, h.Err = s.checkMemberContent(m.Key, m.VersionID)
 		if h.Status != "readable" {
 			plan.Complete = false
 		}

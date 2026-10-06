@@ -189,6 +189,41 @@ in-flight writes can never silently join a confirmed restore point.
   retained by GC, so a restore source can never be reclaimed out from
   under a recovery.
 
+## Object-entry impact analysis
+
+An **impact query** starts from chosen business entry objects inside one
+restore point and follows the directed references the point actually
+saved, explaining the recoverable-scope impact of reference changes:
+
+- `AnalyzeImpact(ImpactQuery{Point, Entries})` traces every simple
+  directed path from the entries. Entry objects are reported as
+  *directly changed*; objects reached only through reference chains are
+  *dependency-affected*, each with every relationship path that reaches
+  it. Cyclic references are preserved completely (each cycle is recorded
+  as a path whose last element repeats an earlier one) but never followed
+  past the closing edge, so traversal always terminates and no object is
+  counted into the scope twice. The analysis is computed once and
+  persisted immutably under `impact/` (atomic rename, temp files
+  discarded by recovery): `GetImpactAnalysis` / `ListImpactAnalyses`
+  return exactly the same record after a reopen, and restore points
+  created later never change an old analysis.
+- Content availability is reported separately from structural impact:
+  every object in scope carries a `readable` / `corrupted` / `missing`
+  content status, while paths and edges come straight from the recorded
+  topology, so an unreadable member never erases a relationship.
+- `CompareImpact(queryA, queryB)` limits each of two restore points by
+  its own business entries and reports the common recoverable scope
+  (with per-side content status) plus the missing dependencies of each
+  side: objects of one scope the other point does not contain at all.
+- `ExportImpactScope(analysisID, keys)` builds a read-only export
+  manifest for a selected subset and explicitly lists, in
+  `ExcludedCrossReferences`, every recorded reference that leaves the
+  selection and is therefore not included.
+- Impact queries never modify restore points or restore objects: they
+  read point files and verify member content, and write only the new
+  immutable analysis record under `impact/`.
+
+
 ## Layout
 
 ```
@@ -203,6 +238,7 @@ in-flight writes can never silently join a confirmed restore point.
   quarantine/{upload,publish,version}/<ts>-<name>/ # isolated residue
   refs/<sha256(pin-name)>.json                     # durable pins (snapshots)
   trash/<ts>-<obj>-<vid>/                          # reclaimed, pending delete
+  impact/<analysis-id>.json                        # immutable impact analyses
   locks/                                           # flocks
 ```
 
@@ -241,6 +277,11 @@ go run ./cmd/objstore pin    <root> <key> <version-id> <name>
 go run ./cmd/objstore unpin  <root> <name>
 go run ./cmd/objstore pins   <root>
 go run ./cmd/objstore gc     <root>
+go run ./cmd/objstore impact        <root> <point> <key1,key2,...>
+go run ./cmd/objstore impact-list   <root>
+go run ./cmd/objstore impact-show   <root> <analysis-id>
+go run ./cmd/objstore impact-diff   <root> <point-a> <keys-a> <point-b> <keys-b>
+go run ./cmd/objstore impact-export <root> <analysis-id> <key1,key2,...>
 ```
 
 ## Tests

@@ -60,7 +60,7 @@ type readerRef struct {
 
 // Open (or creates) a store at root and runs crash recovery before returning.
 func Open(root string, opts *Options) (*Store, RecoveryReport, error) {
-	for _, d := range []string{"objects", filepath.Join("staging", "uploads"), filepath.Join("staging", "publish"), "quarantine", "locks", "refs", "trash", "restorepoints", "restores"} {
+	for _, d := range []string{"objects", filepath.Join("staging", "uploads"), filepath.Join("staging", "publish"), "quarantine", "locks", "refs", "trash", "restorepoints", "restores", "impact"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			return nil, RecoveryReport{}, err
 		}

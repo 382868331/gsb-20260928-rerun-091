@@ -23,6 +23,11 @@
 //	objstore rp-resume  <root> <restore-id>
 //	objstore rp-delete  <root> <name>
 //	objstore restores   <root>
+//	objstore impact       <root> <point> <key1,key2,...>
+//	objstore impact-list  <root>
+//	objstore impact-show  <root> <analysis-id>
+//	objstore impact-diff  <root> <point-a> <keys-a> <point-b> <keys-b>
+//	objstore impact-export <root> <analysis-id> <key1,key2,...>
 package main
 
 import (
@@ -320,11 +325,99 @@ func main() {
 		for _, rec := range recs {
 			fmt.Printf("%s point=%s state=%s\n", rec.ID, rec.PointName, rec.State)
 		}
+	case "impact":
+		if len(os.Args) != 5 {
+			usage()
+		}
+		an, err := s.AnalyzeImpact(localobjstore.ImpactQuery{Point: key, Entries: strings.Split(os.Args[4], ",")})
+		if err != nil {
+			die(err)
+		}
+		printImpact(an)
+	case "impact-list":
+		list, err := s.ListImpactAnalyses()
+		if err != nil {
+			die(err)
+		}
+		for _, an := range list {
+			fmt.Printf("%s point=%s entries=%d objects=%d created=%s\n", an.ID, an.PointName, len(an.Entries), len(an.Objects), an.CreatedAt.Format("2006-01-02T15:04:05Z"))
+		}
+	case "impact-show":
+		if key == "" {
+			usage()
+		}
+		an, err := s.GetImpactAnalysis(key)
+		if err != nil {
+			die(err)
+		}
+		printImpact(an)
+	case "impact-diff":
+		if len(os.Args) != 7 {
+			usage()
+		}
+		cmp, err := s.CompareImpact(
+			localobjstore.ImpactQuery{Point: key, Entries: strings.Split(os.Args[4], ",")},
+			localobjstore.ImpactQuery{Point: os.Args[5], Entries: strings.Split(os.Args[6], ",")},
+		)
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("common recoverable scope (%d):\n", len(cmp.Common))
+		for _, c := range cmp.Common {
+			rec := ""
+			if !c.Recoverable {
+				rec = " (not readable on both sides)"
+			}
+			fmt.Printf("  %s A=%s(%s) B=%s(%s)%s\n", c.Key, c.VersionA, c.ContentA, c.VersionB, c.ContentB, rec)
+		}
+		for _, k := range cmp.A.MissingDependencies {
+			fmt.Printf("missing in %s: %s (needed by scope of %s)\n", cmp.B.Query.Point, k, cmp.A.Query.Point)
+		}
+		for _, k := range cmp.B.MissingDependencies {
+			fmt.Printf("missing in %s: %s (needed by scope of %s)\n", cmp.A.Query.Point, k, cmp.B.Query.Point)
+		}
+	case "impact-export":
+		if len(os.Args) != 5 {
+			usage()
+		}
+		exp, err := s.ExportImpactScope(key, strings.Split(os.Args[4], ","))
+		if err != nil {
+			die(err)
+		}
+		fmt.Printf("export of analysis %s (point %q):\n", exp.AnalysisID, exp.PointName)
+		for _, m := range exp.Included {
+			fmt.Printf("  included %s %s\n", m.Key, m.VersionID)
+		}
+		for _, x := range exp.ExcludedCrossReferences {
+			fmt.Printf("  NOT included: reference %s -> %s crosses the export boundary\n", x.From, x.To)
+		}
 	default:
 		usage()
 	}
 }
+func printImpact(an localobjstore.ImpactAnalysis) {
+	fmt.Printf("impact analysis %s point=%q (%s) entries=%s\n", an.ID, an.PointName, an.PointID, strings.Join(an.Entries, ","))
+	for _, o := range an.Objects {
+		kind := "dependency-affected"
+		if o.Direct {
+			kind = "directly-changed"
+		}
+		line := fmt.Sprintf("  %-20s %s %s content=%s", kind, o.Key, o.VersionID, o.Content)
+		if o.ContentErr != "" {
+			line += " (" + o.ContentErr + ")"
+		}
+		fmt.Println(line)
+		for _, p := range o.Paths {
+			fmt.Printf("    path: %s\n", strings.Join(p, " -> "))
+		}
+	}
+	for _, c := range an.Cycles {
+		fmt.Printf("  cycle: %s\n", strings.Join(c, " -> "))
+	}
+}
+
 func printRestore(rec localobjstore.RestoreRecord) {
+
 	fmt.Printf("restore %s point=%q state=%s\n", rec.ID, rec.PointName, rec.State)
 	for _, m := range rec.Members {
 		line := fmt.Sprintf("  %-9s %s %s", m.State, m.Key, m.VersionID)
